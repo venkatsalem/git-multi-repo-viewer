@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 import {
   Flag,
   FolderOpen,
@@ -6,12 +13,10 @@ import {
   GitCommitHorizontal,
   GitCompare,
   GitPullRequest,
-  Monitor,
-  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
-  Sun,
+  Settings,
   Timer,
   X
 } from 'lucide-react';
@@ -29,10 +34,15 @@ import {
   DiffPane
 } from './components/DiffPane';
 import { FileExplorerSidebar } from './components/FileExplorerSidebar';
+import { SettingsModal, ThemePreference } from './components/SettingsModal';
 import { ViewMode } from './components/TreeOrListRenderer';
+import {
+  FontPreferences,
+  loadFontPreferences,
+  saveAndApplyFontPreferences
+} from './utils/fontPreferences';
 
 type SidebarTab = 'changes' | 'files' | 'commits';
-type ThemePreference = 'system' | 'light' | 'dark';
 
 const AUTO_SCAN_INTERVAL_MS = 15_000;
 
@@ -71,11 +81,57 @@ export const App: React.FC = () => {
     void window.gitViewer.setThemeSource(themePreference);
   }, [resolvedTheme, themePreference]);
 
-  const cycleTheme = () => {
-    setThemePreference((prev) =>
-      prev === 'system' ? 'light' : prev === 'light' ? 'dark' : 'system'
-    );
-  };
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [fontPreferences, setFontPreferences] = useState<FontPreferences>(() =>
+    loadFontPreferences()
+  );
+
+  useLayoutEffect(() => {
+    saveAndApplyFontPreferences(fontPreferences);
+  }, [fontPreferences]);
+
+  const [repoOrderByRoot, setRepoOrderByRoot] = useState<
+    Record<string, string[]>
+  >(() => {
+    try {
+      const raw = localStorage.getItem('gmrv.repoOrderByRoot');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return parsed as Record<string, string[]>;
+        }
+      }
+    } catch {
+      // ignore malformed storage
+    }
+    return {};
+  });
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'gmrv.fontPreferences') {
+        setFontPreferences(loadFontPreferences());
+      } else if (
+        e.key === 'gmrv.themePreference' &&
+        (e.newValue === 'system' ||
+          e.newValue === 'light' ||
+          e.newValue === 'dark')
+      ) {
+        setThemePreference(e.newValue);
+      } else if (e.key === 'gmrv.repoOrderByRoot' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          if (parsed && typeof parsed === 'object') {
+            setRepoOrderByRoot(parsed as Record<string, string[]>);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
   const [rootPath, setRootPath] = useState<string>('');
   const [suggestedRoot, setSuggestedRoot] = useState<string>('');
   const [manualPath, setManualPath] = useState<string>('');
@@ -340,6 +396,51 @@ export const App: React.FC = () => {
     }
     await openRootInCurrentWindow(picked);
   };
+
+  const handleOpenRepoInNewWindow = useCallback(
+    (repoPath: string) => {
+      recordRecentRoot(repoPath);
+      void window.gitViewer.openRootInNewWindow(repoPath);
+    },
+    [recordRecentRoot]
+  );
+
+  const orderedRepos = useMemo(() => {
+    if (!rootPath) return repos;
+    const order = repoOrderByRoot[rootPath];
+    if (!order || order.length === 0) return repos;
+    const indexMap = new Map(order.map((id, idx) => [id, idx]));
+    return [...repos].sort((a, b) => {
+      const ia = indexMap.get(a.id);
+      const ib = indexMap.get(b.id);
+      if (ia !== undefined && ib !== undefined) return ia - ib;
+      if (ia !== undefined) return -1;
+      if (ib !== undefined) return 1;
+      return 0;
+    });
+  }, [repos, rootPath, repoOrderByRoot]);
+
+  const handleReorderRepo = useCallback(
+    (
+      sourceRepoId: string,
+      targetRepoId: string,
+      position: 'before' | 'after'
+    ) => {
+      if (!rootPath || sourceRepoId === targetRepoId) return;
+      const currentIds = orderedRepos.map((r) => r.id);
+      const filtered = currentIds.filter((id) => id !== sourceRepoId);
+      const targetIdx = filtered.indexOf(targetRepoId);
+      if (targetIdx === -1) return;
+      const insertIdx = position === 'before' ? targetIdx : targetIdx + 1;
+      filtered.splice(insertIdx, 0, sourceRepoId);
+      setRepoOrderByRoot((prev) => {
+        const next = { ...prev, [rootPath]: filtered };
+        localStorage.setItem('gmrv.repoOrderByRoot', JSON.stringify(next));
+        return next;
+      });
+    },
+    [rootPath, orderedRepos]
+  );
 
   const handleSetBaseline = () => {
     const map: Record<string, string> = {};
@@ -661,37 +762,43 @@ export const App: React.FC = () => {
             <RefreshCw size={13} className={isScanning ? 'spin' : ''} />
             {isScanning ? 'Scanning...' : 'Refresh'}
           </button>
-
-          <button
-            className="btn"
-            onClick={cycleTheme}
-            title={`Theme: ${themePreference} (click to switch System / Light / Dark)`}
-          >
-            {themePreference === 'system' ? (
-              <Monitor size={13} />
-            ) : themePreference === 'light' ? (
-              <Sun size={13} />
-            ) : (
-              <Moon size={13} />
-            )}
-            <span style={{ textTransform: 'capitalize' }}>{themePreference}</span>
-          </button>
         </div>
       </div>
 
       {!rootPath ? (
         <div className="welcome-screen">
           <div className="welcome-card">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <GitCompare size={24} style={{ color: 'var(--accent)' }} />
-              <div>
-                <div style={{ fontSize: 17, fontWeight: 600 }}>
-                  Choose Workspace Root
-                </div>
-                <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
-                  Select a folder to discover and review all nested Git repositories
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 10
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <GitCompare size={24} style={{ color: 'var(--accent)' }} />
+                <div>
+                  <div style={{ fontSize: '1.308rem', fontWeight: 600 }}>
+                    Choose Workspace Root
+                  </div>
+                  <div
+                    style={{
+                      fontSize: '0.962rem',
+                      color: 'var(--text-secondary)'
+                    }}
+                  >
+                    Select a folder to discover and review all nested Git repositories
+                  </div>
                 </div>
               </div>
+              <button
+                className="icon-btn"
+                onClick={() => setSettingsOpen(true)}
+                title="Settings (Theme & Fonts)"
+              >
+                <Settings size={16} />
+              </button>
             </div>
 
             <div style={{ display: 'flex', gap: 8 }}>
@@ -846,6 +953,14 @@ export const App: React.FC = () => {
               <PanelLeftOpen size={18} />
             )}
           </button>
+
+          <button
+            className="rail-btn"
+            onClick={() => setSettingsOpen(true)}
+            title="Settings (Theme & Fonts)"
+          >
+            <Settings size={18} />
+          </button>
         </div>
 
         {sidebarOpen && (
@@ -853,7 +968,7 @@ export const App: React.FC = () => {
             <div className="sidebar" style={{ width: effectiveSidebarWidth }}>
           {activeTab === 'changes' && (
             <ChangesSidebar
-              repos={repos}
+              repos={orderedRepos}
               viewMode={viewMode}
               onChangeViewMode={setViewMode}
               selectedChangeKey={selectedChangeKey}
@@ -894,6 +1009,8 @@ export const App: React.FC = () => {
               onStageFile={handleStageFile}
               onUnstageFile={handleUnstageFile}
               onRevertFile={handleRevertFile}
+              onOpenRepoInNewWindow={handleOpenRepoInNewWindow}
+              onReorderRepo={handleReorderRepo}
               isCommitting={isCommitting}
               baselineMap={baselineMap}
             />
@@ -901,7 +1018,7 @@ export const App: React.FC = () => {
 
           {activeTab === 'files' && (
             <FileExplorerSidebar
-              repos={repos}
+              repos={orderedRepos}
               viewMode={viewMode}
               onChangeViewMode={setViewMode}
               selectedFileKey={selectedFileKey}
@@ -934,12 +1051,14 @@ export const App: React.FC = () => {
                   customRef: ''
                 })
               }
+              onOpenRepoInNewWindow={handleOpenRepoInNewWindow}
+              onReorderRepo={handleReorderRepo}
             />
           )}
 
           {activeTab === 'commits' && (
             <CommitExplorerSidebar
-              repos={repos}
+              repos={orderedRepos}
               commits={commits}
               loadingCommits={loadingCommits}
               viewMode={viewMode}
@@ -1000,9 +1119,11 @@ export const App: React.FC = () => {
 
         <DiffPane
           viewerState={viewerState}
-          repos={repos}
+          repos={orderedRepos}
           baselineMap={baselineMap}
           resolvedTheme={resolvedTheme}
+          editorFont={fontPreferences.editorFont}
+          editorFontSize={fontPreferences.editorFontSize}
           onChangeViewerState={setViewerState}
           onUpdateCompareSlots={(left, right) => {
             setCompareLeft(left);
@@ -1014,6 +1135,16 @@ export const App: React.FC = () => {
       )}
 
       {toast && <div className={`toast ${toast.kind}`}>{toast.message}</div>}
+
+      {settingsOpen && (
+        <SettingsModal
+          themePreference={themePreference}
+          onChangeTheme={setThemePreference}
+          fontPreferences={fontPreferences}
+          onChangeFonts={setFontPreferences}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </div>
   );
 };

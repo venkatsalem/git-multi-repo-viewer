@@ -67,6 +67,8 @@ interface DiffPaneProps {
   repos: RepoSummary[];
   baselineMap: Record<string, string>;
   resolvedTheme: 'light' | 'dark';
+  editorFont?: string;
+  editorFontSize?: number;
   onChangeViewerState: (next: ActiveViewerState) => void;
   onUpdateCompareSlots: (left: CompareSlot, right: CompareSlot) => void;
 }
@@ -92,6 +94,8 @@ export const DiffPane: React.FC<DiffPaneProps> = ({
   repos,
   baselineMap,
   resolvedTheme,
+  editorFont,
+  editorFontSize,
   onChangeViewerState,
   onUpdateCompareSlots
 }) => {
@@ -602,7 +606,8 @@ export const DiffPane: React.FC<DiffPaneProps> = ({
                   wordWrap === 'on' || (wordWrap === 'auto' && paneWidth < 680)
                     ? 'on'
                     : 'off',
-                fontSize: 13,
+                fontFamily: editorFont,
+                fontSize: editorFontSize ?? 13,
                 scrollBeyondLastLine: false,
                 automaticLayout: true
               }}
@@ -635,7 +640,8 @@ export const DiffPane: React.FC<DiffPaneProps> = ({
                     : 'off',
                 ignoreTrimWhitespace,
                 minimap: { enabled: false },
-                fontSize: 13,
+                fontFamily: editorFont,
+                fontSize: editorFontSize ?? 13,
                 scrollBeyondLastLine: false,
                 automaticLayout: true,
                 renderOverviewRuler: true

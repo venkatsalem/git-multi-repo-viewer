@@ -3,15 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "description": "Lightweight IntelliJ-style multi-repo Git commit, file, and diff viewer built with Electron, React, and Monaco",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/venkatsalem/git-multi-repo-viewer.git"
+  },
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && tsc -p tsconfig.electron.json && electron .\"",
     "build": "tsc -p tsconfig.json && vite build && tsc -p tsconfig.electron.json",
     "package": "npm run build && node scripts/package.mjs",
+    "shortcut": "node scripts/create-shortcut.mjs",
     "start": "npm run build && electron ."
   },
   "dependencies": {
     "@fontsource/google-sans": "^5.3.2",
+    "@fontsource/jetbrains-mono": "^5.3.0",
     "@monaco-editor/react": "^4.7.0",
     "lucide-react": "^0.511.0",
     "monaco-editor": "^0.52.2",

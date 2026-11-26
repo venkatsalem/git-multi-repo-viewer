@@ -4,10 +4,28 @@ import {
   dialog,
   ipcMain,
   nativeTheme,
-  screen
+  screen,
+  shell
 } from 'electron';
+import { spawn } from 'child_process';
 import fs from 'fs';
+import net from 'net';
 import path from 'path';
+
+function isLocalPortOpen(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ port, host: '127.0.0.1' });
+    const done = (result: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(350);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+  });
+}
 import {
   commitAcrossRepos,
   discardFiles,
@@ -166,6 +184,15 @@ function createWindow(initialRoot?: string): void {
     void win.loadURL(devServerUrl);
   } else if (!app.isPackaged && process.env.NODE_ENV === 'development') {
     void win.loadURL('http://localhost:5173');
+  } else if (!app.isPackaged) {
+    void isLocalPortOpen(5173).then((running) => {
+      if (win.isDestroyed()) return;
+      if (running) {
+        void win.loadURL('http://localhost:5173');
+      } else {
+        void win.loadFile(path.join(__dirname, '../../dist/index.html'));
+      }
+    });
   } else {
     void win.loadFile(path.join(__dirname, '../../dist/index.html'));
   }
@@ -307,6 +334,62 @@ app.whenReady().then(() => {
       }
     }
   );
+
+  ipcMain.handle(
+    'shell:showInExplorer',
+    async (_e, targetPath: string, isFile = false) => {
+      if (!targetPath) return;
+      const resolved = path.resolve(targetPath);
+      if (isFile) {
+        if (fs.existsSync(resolved)) {
+          shell.showItemInFolder(resolved);
+        } else {
+          await shell.openPath(path.dirname(resolved));
+        }
+      } else {
+        await shell.openPath(resolved);
+      }
+    }
+  );
+
+  ipcMain.handle('shell:openTerminal', async (_e, targetPath: string) => {
+    if (!targetPath) return;
+    const resolvedInput = path.resolve(targetPath);
+    const resolvedDir =
+      fs.existsSync(resolvedInput) && fs.statSync(resolvedInput).isDirectory()
+        ? resolvedInput
+        : path.dirname(resolvedInput);
+
+    if (process.platform === 'win32') {
+      const child = spawn('wt.exe', ['-d', resolvedDir], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: false
+      });
+      child.on('error', () => {
+        const fallback = spawn(
+          'cmd.exe',
+          ['/c', 'start', '""', 'cmd.exe', '/K', `cd /d "${resolvedDir}"`],
+          { detached: true, stdio: 'ignore', windowsHide: true }
+        );
+        fallback.unref();
+      });
+      child.unref();
+    } else if (process.platform === 'darwin') {
+      const child = spawn('open', ['-a', 'Terminal', resolvedDir], {
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+    } else {
+      const child = spawn('x-terminal-emulator', [], {
+        cwd: resolvedDir,
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+    }
+  });
 
   nativeTheme.on('updated', () => {
     const bg = nativeTheme.shouldUseDarkColors ? '#1e1f22' : '#f5f6f8';

@@ -41,6 +41,8 @@ export interface GitViewerApi {
   ) => Promise<CommitResultItem[]>;
   onWorkspaceChanged: (callback: () => void) => () => void;
   setThemeSource: (source: 'system' | 'light' | 'dark') => Promise<void>;
+  showInExplorer: (targetPath: string, isFile?: boolean) => Promise<void>;
+  openTerminal: (targetPath: string) => Promise<void>;
 }
 
 const api: GitViewerApi = {
@@ -74,7 +76,11 @@ const api: GitViewerApi = {
       ipcRenderer.removeListener('workspace:changed', handler);
     };
   },
-  setThemeSource: (source) => ipcRenderer.invoke('theme:setSource', source)
+  setThemeSource: (source) => ipcRenderer.invoke('theme:setSource', source),
+  showInExplorer: (targetPath, isFile) =>
+    ipcRenderer.invoke('shell:showInExplorer', targetPath, isFile),
+  openTerminal: (targetPath) =>
+    ipcRenderer.invoke('shell:openTerminal', targetPath)
 };
 
 contextBridge.exposeInMainWorld('gitViewer', api);

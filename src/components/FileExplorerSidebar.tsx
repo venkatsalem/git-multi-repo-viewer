@@ -2,11 +2,16 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
+  ExternalLink,
+  Eye,
+  FolderOpen,
   FoldVertical,
   FolderTree,
   GitBranch,
   List,
   Search,
+  Terminal,
   UnfoldVertical
 } from 'lucide-react';
 import { FileEntry, RepoSummary } from '../../shared/types';
@@ -25,6 +30,17 @@ interface FileExplorerSidebarProps {
   onCompareVsHead: (repo: RepoSummary, filePath: string) => void;
   onCompareWithA: (repo: RepoSummary, filePath: string) => void;
   onCompareWithB: (repo: RepoSummary, filePath: string) => void;
+  onOpenRepoInNewWindow: (repoPath: string) => void;
+  onReorderRepo: (
+    sourceRepoId: string,
+    targetRepoId: string,
+    position: 'before' | 'after'
+  ) => void;
+}
+
+function joinRepoFilePath(repoPath: string, filePath: string): string {
+  const base = repoPath.replace(/[\\/]+$/, '');
+  return `${base}/${filePath}`;
 }
 
 export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
@@ -35,7 +51,9 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
   onSelectFile,
   onCompareVsHead,
   onCompareWithA,
-  onCompareWithB
+  onCompareWithB,
+  onOpenRepoInNewWindow,
+  onReorderRepo
 }) => {
   const [selectedRepoId, setSelectedRepoId] = useState<string>('ALL');
   const [filterText, setFilterText] = useState('');
@@ -43,6 +61,39 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
   const [loadingRepos, setLoadingRepos] = useState<Set<string>>(new Set());
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [fileContextMenu, setFileContextMenu] = useState<{
+    x: number;
+    y: number;
+    repo: RepoSummary;
+    filePath: string;
+  } | null>(null);
+  const [repoContextMenu, setRepoContextMenu] = useState<{
+    x: number;
+    y: number;
+    repo: RepoSummary;
+  } | null>(null);
+  const [draggedRepoId, setDraggedRepoId] = useState<string | null>(null);
+  const [dropIndicator, setDropIndicator] = useState<{
+    repoId: string;
+    position: 'before' | 'after';
+  } | null>(null);
+
+  useEffect(() => {
+    if (!fileContextMenu && !repoContextMenu) return;
+    const close = () => {
+      setFileContextMenu(null);
+      setRepoContextMenu(null);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [fileContextMenu, repoContextMenu]);
 
   const loadRepoFiles = async (repo: RepoSummary): Promise<FileEntry[]> => {
     if (filesByRepo[repo.id]) return filesByRepo[repo.id];
@@ -203,9 +254,73 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
             repo.changes.map((c) => [c.path, c.status])
           );
 
+          const isDirtyOrAhead = repo.changes.length > 0 || repo.ahead > 0;
+          const dropClass =
+            dropIndicator?.repoId === repo.id
+              ? `drop-${dropIndicator.position}`
+              : '';
+
           return (
-            <div key={repo.id} className="repo-group">
-              <div className="repo-header" onClick={() => toggleRepo(repo)}>
+            <div key={repo.id} className={`repo-group ${dropClass}`.trim()}>
+              <div
+                className={`repo-header ${isDirtyOrAhead ? 'repo-dirty' : 'repo-clean'}`}
+                draggable={visibleRepos.length > 1}
+                onDragStart={(e) => {
+                  setDraggedRepoId(repo.id);
+                  e.dataTransfer.effectAllowed = 'move';
+                  e.dataTransfer.setData('text/plain', repo.id);
+                }}
+                onDragOver={(e) => {
+                  if (!draggedRepoId || draggedRepoId === repo.id) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const position =
+                    e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                  setDropIndicator((prev) =>
+                    prev?.repoId === repo.id && prev.position === position
+                      ? prev
+                      : { repoId: repo.id, position }
+                  );
+                }}
+                onDragLeave={(e) => {
+                  if (
+                    e.relatedTarget instanceof Node &&
+                    e.currentTarget.contains(e.relatedTarget)
+                  ) {
+                    return;
+                  }
+                  setDropIndicator((prev) =>
+                    prev?.repoId === repo.id ? null : prev
+                  );
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const sourceId =
+                    draggedRepoId || e.dataTransfer.getData('text/plain');
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const position =
+                    e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+                  setDraggedRepoId(null);
+                  setDropIndicator(null);
+                  if (sourceId && sourceId !== repo.id) {
+                    onReorderRepo(sourceId, repo.id, position);
+                  }
+                }}
+                onDragEnd={() => {
+                  setDraggedRepoId(null);
+                  setDropIndicator(null);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setFileContextMenu(null);
+                  const x = Math.min(e.clientX, window.innerWidth - 220);
+                  const y = Math.min(e.clientY, window.innerHeight - 190);
+                  setRepoContextMenu({ x, y, repo });
+                }}
+                onClick={() => toggleRepo(repo)}
+              >
                 {isExpanded ? (
                   <ChevronDown size={14} style={{ flexShrink: 0 }} />
                 ) : (
@@ -237,6 +352,14 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
                   onToggleDir={toggleDir}
                   dirKeyPrefix={`files:${repo.id}`}
                   onSelect={(f) => onSelectFile(repo, f.path)}
+                  onItemContextMenu={(e, f) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setRepoContextMenu(null);
+                    const x = Math.min(e.clientX, window.innerWidth - 220);
+                    const y = Math.min(e.clientY, window.innerHeight - 250);
+                    setFileContextMenu({ x, y, repo, filePath: f.path });
+                  }}
                   renderSuffix={(f) => {
                     const st = statusLookup.get(f.path);
                     return st ? (
@@ -274,6 +397,147 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
           );
         })}
       </div>
+
+      {fileContextMenu && (
+        <div
+          className="context-menu"
+          style={{ left: fileContextMenu.x, top: fileContextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              onSelectFile(fileContextMenu.repo, fileContextMenu.filePath);
+              setFileContextMenu(null);
+            }}
+          >
+            <Eye size={14} /> Open File
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              onCompareVsHead(fileContextMenu.repo, fileContextMenu.filePath);
+              setFileContextMenu(null);
+            }}
+          >
+            Diff against HEAD
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              onCompareWithA(fileContextMenu.repo, fileContextMenu.filePath);
+              setFileContextMenu(null);
+            }}
+          >
+            Set as Compare Left (A)
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              onCompareWithB(fileContextMenu.repo, fileContextMenu.filePath);
+              setFileContextMenu(null);
+            }}
+          >
+            Set as Compare Right (B)
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              void navigator.clipboard.writeText(fileContextMenu.filePath);
+              setFileContextMenu(null);
+            }}
+          >
+            <Copy size={14} /> Copy Relative Path
+          </button>
+
+          <div className="context-menu-divider" />
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const target = joinRepoFilePath(
+                fileContextMenu.repo.path,
+                fileContextMenu.filePath
+              );
+              setFileContextMenu(null);
+              void window.gitViewer.showInExplorer(target, true);
+            }}
+          >
+            <FolderOpen size={14} /> Show in Explorer
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const target = joinRepoFilePath(
+                fileContextMenu.repo.path,
+                fileContextMenu.filePath
+              );
+              setFileContextMenu(null);
+              void window.gitViewer.openTerminal(target);
+            }}
+          >
+            <Terminal size={14} /> Open Terminal Here
+          </button>
+        </div>
+      )}
+
+      {repoContextMenu && (
+        <div
+          className="context-menu"
+          style={{ left: repoContextMenu.x, top: repoContextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const target = repoContextMenu.repo.path;
+              setRepoContextMenu(null);
+              void window.gitViewer.showInExplorer(target, false);
+            }}
+          >
+            <FolderOpen size={14} /> Show in Explorer
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const target = repoContextMenu.repo.path;
+              setRepoContextMenu(null);
+              void window.gitViewer.openTerminal(target);
+            }}
+          >
+            <Terminal size={14} /> Open Terminal in Repo
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const target = repoContextMenu.repo.path;
+              setRepoContextMenu(null);
+              onOpenRepoInNewWindow(target);
+            }}
+          >
+            <ExternalLink size={14} /> Open Repo in New Window
+          </button>
+
+          <div className="context-menu-divider" />
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              void navigator.clipboard.writeText(repoContextMenu.repo.path);
+              setRepoContextMenu(null);
+            }}
+          >
+            <Copy size={14} /> Copy Repo Path
+          </button>
+        </div>
+      )}
     </div>
   );
 };
