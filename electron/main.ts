@@ -27,11 +27,15 @@ function isLocalPortOpen(port: number): Promise<boolean> {
   });
 }
 import {
+  checkoutBranchAcrossRepos,
+  checkoutBranchInRepo,
   commitAcrossRepos,
   commitStagedAcrossRepos,
   discardFiles,
+  fetchAllRepos,
   getCommitFiles,
   getDiffContent,
+  getRepoBranches,
   getRepoCommits,
   getRepoRefs,
   getSkipWorktreeFiles,
@@ -44,13 +48,16 @@ import {
   stageAllInRepo,
   stageFiles,
   unstageAllInRepo,
-  unstageFiles
+  unstageFiles,
+  updateProjectRepos
 } from './gitService';
 import {
   CommitActionTarget,
   CompareSource,
   IgnoreTarget,
-  RepoSummary
+  RepoBatchTarget,
+  RepoSummary,
+  UpdateProjectOptions
 } from '../shared/types';
 
 const windowInitialRootMap = new Map<number, string>();
@@ -140,6 +147,7 @@ function createWindow(initialRoot?: string): void {
     minWidth: 640,
     minHeight: 480,
     icon,
+    autoHideMenuBar: true,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#1e1f22' : '#f5f6f8',
     title: initialRoot
       ? `Git Multi-Repo Viewer — ${path.basename(initialRoot)}`
@@ -150,6 +158,8 @@ function createWindow(initialRoot?: string): void {
       nodeIntegration: false
     }
   });
+
+  win.setMenuBarVisibility(false);
 
   if (state.isMaximized) {
     win.maximize();
@@ -377,6 +387,52 @@ app.whenReady().then(() => {
     'git:remoteAction',
     async (_e, repoPath: string, action: 'fetch' | 'pull' | 'push') => {
       return runGitRemoteAction(repoPath, action);
+    }
+  );
+
+  ipcMain.handle(
+    'git:fetchAllRepos',
+    async (_e, repos: RepoBatchTarget[]) => {
+      return fetchAllRepos(repos);
+    }
+  );
+
+  ipcMain.handle(
+    'git:updateProjectRepos',
+    async (
+      _e,
+      repos: RepoBatchTarget[],
+      options: UpdateProjectOptions
+    ) => {
+      return updateProjectRepos(repos, options);
+    }
+  );
+
+  ipcMain.handle('git:getRepoBranches', async (_e, repoPath: string) => {
+    return getRepoBranches(repoPath);
+  });
+
+  ipcMain.handle(
+    'git:checkoutBranch',
+    async (
+      _e,
+      repoPath: string,
+      targetBranch: string,
+      options?: { createNew?: boolean; isRemote?: boolean }
+    ) => {
+      return checkoutBranchInRepo(repoPath, targetBranch, options);
+    }
+  );
+
+  ipcMain.handle(
+    'git:checkoutBranchAcrossRepos',
+    async (
+      _e,
+      repos: RepoBatchTarget[],
+      targetBranch: string,
+      createIfMissing: boolean
+    ) => {
+      return checkoutBranchAcrossRepos(repos, targetBranch, createIfMissing);
     }
   );
 

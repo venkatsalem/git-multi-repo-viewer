@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
+  BranchListResult,
   CommitActionTarget,
   CommitFileChange,
   CommitInfo,
@@ -11,8 +12,11 @@ import {
   GitRemoteActionResult,
   IgnoreFileResult,
   IgnoreTarget,
+  RepoBatchResultItem,
+  RepoBatchTarget,
   RepoRefs,
   RepoSummary,
+  UpdateProjectOptions,
   WorkspaceScanResult
 } from '../shared/types';
 
@@ -64,6 +68,22 @@ export interface GitViewerApi {
     repoPath: string,
     action: 'fetch' | 'pull' | 'push'
   ) => Promise<GitRemoteActionResult>;
+  fetchAllRepos: (repos: RepoBatchTarget[]) => Promise<RepoBatchResultItem[]>;
+  updateProjectRepos: (
+    repos: RepoBatchTarget[],
+    options: UpdateProjectOptions
+  ) => Promise<RepoBatchResultItem[]>;
+  getRepoBranches: (repoPath: string) => Promise<BranchListResult>;
+  checkoutBranch: (
+    repoPath: string,
+    targetBranch: string,
+    options?: { createNew?: boolean; isRemote?: boolean }
+  ) => Promise<{ branch: string; summary: string }>;
+  checkoutBranchAcrossRepos: (
+    repos: RepoBatchTarget[],
+    targetBranch: string,
+    createIfMissing: boolean
+  ) => Promise<RepoBatchResultItem[]>;
   onWorkspaceChanged: (callback: () => void) => () => void;
   setThemeSource: (source: 'system' | 'light' | 'dark') => Promise<void>;
   showInExplorer: (targetPath: string, isFile?: boolean) => Promise<void>;
@@ -106,6 +126,20 @@ const api: GitViewerApi = {
     ipcRenderer.invoke('git:getSkipWorktreeFiles', repoPath),
   remoteAction: (repoPath, action) =>
     ipcRenderer.invoke('git:remoteAction', repoPath, action),
+  fetchAllRepos: (repos) => ipcRenderer.invoke('git:fetchAllRepos', repos),
+  updateProjectRepos: (repos, options) =>
+    ipcRenderer.invoke('git:updateProjectRepos', repos, options),
+  getRepoBranches: (repoPath) =>
+    ipcRenderer.invoke('git:getRepoBranches', repoPath),
+  checkoutBranch: (repoPath, targetBranch, options) =>
+    ipcRenderer.invoke('git:checkoutBranch', repoPath, targetBranch, options),
+  checkoutBranchAcrossRepos: (repos, targetBranch, createIfMissing) =>
+    ipcRenderer.invoke(
+      'git:checkoutBranchAcrossRepos',
+      repos,
+      targetBranch,
+      createIfMissing
+    ),
   onWorkspaceChanged: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('workspace:changed', handler);

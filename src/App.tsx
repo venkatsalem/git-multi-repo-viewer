@@ -7,9 +7,15 @@ import React, {
   useState
 } from 'react';
 import {
+  Check,
+  ChevronDown,
+  CloudDownload,
+  Download,
+  ExternalLink,
   Flag,
   FolderOpen,
   FolderTree,
+  GitBranch,
   GitCommitHorizontal,
   GitCompare,
   GitPullRequest,
@@ -25,7 +31,9 @@ import {
   CommitFileChange,
   CommitInfo,
   IgnoreTarget,
-  RepoSummary
+  RepoBatchResultItem,
+  RepoSummary,
+  UpdateStrategy
 } from '../shared/types';
 import { ChangesSidebar, makeChangeKey } from './components/ChangesSidebar';
 import { CommitExplorerSidebar } from './components/CommitExplorerSidebar';
@@ -37,6 +45,9 @@ import {
 import { FileExplorerSidebar } from './components/FileExplorerSidebar';
 import { SettingsModal, ThemePreference } from './components/SettingsModal';
 import { ViewMode } from './components/TreeOrListRenderer';
+import { UpdateProjectModal } from './components/UpdateProjectModal';
+import { RepoBranchModal } from './components/RepoBranchModal';
+import { BatchBranchModal } from './components/BatchBranchModal';
 import {
   FontPreferences,
   loadFontPreferences,
@@ -153,6 +164,14 @@ export const App: React.FC = () => {
   });
   const [repos, setRepos] = useState<RepoSummary[]>([]);
   const [isScanning, setIsScanning] = useState(false);
+  const [isFetchingAll, setIsFetchingAll] = useState(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
+  const [batchBranchModalOpen, setBatchBranchModalOpen] = useState(false);
+  const [branchTargetRepo, setBranchTargetRepo] = useState<RepoSummary | null>(
+    null
+  );
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const [autoScanEnabled, setAutoScanEnabled] = useState(true);
   const isScanningRef = useRef(false);
 
@@ -405,6 +424,47 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  const handleOpenFolderInCurrent = async () => {
+    setWorkspaceMenuOpen(false);
+    const picked = await window.gitViewer.pickFolder();
+    if (!picked) return;
+    await openRootInCurrentWindow(picked);
+  };
+
+  const handleOpenFolderInNewWindow = async () => {
+    setWorkspaceMenuOpen(false);
+    const picked = await window.gitViewer.pickFolder();
+    if (!picked) return;
+    recordRecentRoot(picked);
+    if (!rootPath) {
+      await openRootInCurrentWindow(picked);
+    } else {
+      await window.gitViewer.openRootInNewWindow(picked);
+    }
+  };
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (
+        workspaceMenuRef.current &&
+        e.target instanceof Node &&
+        !workspaceMenuRef.current.contains(e.target)
+      ) {
+        setWorkspaceMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setWorkspaceMenuOpen(false);
+    };
+    window.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [workspaceMenuOpen]);
+
   const handleOpenFolder = async () => {
     const picked = await window.gitViewer.pickFolder();
     if (!picked) return;
@@ -483,15 +543,108 @@ export const App: React.FC = () => {
     let dirtyFiles = 0;
     let dirtyRepos = 0;
     let unpushedCommits = 0;
+    let behindCommits = 0;
     for (const r of repos) {
       if (r.changes.length > 0) {
         dirtyRepos += 1;
         dirtyFiles += r.changes.length;
       }
       unpushedCommits += r.ahead;
+      behindCommits += r.behind;
     }
-    return { dirtyFiles, dirtyRepos, unpushedCommits };
+    return { dirtyFiles, dirtyRepos, unpushedCommits, behindCommits };
   }, [repos]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === 't' &&
+        rootPath &&
+        repos.length > 0
+      ) {
+        e.preventDefault();
+        setUpdateModalOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [rootPath, repos.length]);
+
+  const handleCheckoutSingleBranch = async (
+    repo: RepoSummary,
+    targetBranch: string,
+    options?: { createNew?: boolean; isRemote?: boolean }
+  ): Promise<boolean> => {
+    try {
+      const res = await window.gitViewer.checkoutBranch(
+        repo.path,
+        targetBranch,
+        options
+      );
+      showToast('success', `${repo.name}: ${res.summary}`);
+      await refreshWorkspace(rootPath, true);
+      return true;
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to switch branch'
+      );
+      return false;
+    }
+  };
+
+  const handleBatchCheckoutBranches = async (
+    targetRepos: RepoSummary[],
+    targetBranch: string,
+    createIfMissing: boolean
+  ): Promise<RepoBatchResultItem[]> => {
+    const results = await window.gitViewer.checkoutBranchAcrossRepos(
+      targetRepos.map((r) => ({ id: r.id, name: r.name, path: r.path })),
+      targetBranch,
+      createIfMissing
+    );
+    await refreshWorkspace(rootPath, true);
+    return results;
+  };
+
+  const handleFetchAll = async () => {
+    if (isFetchingAll || orderedRepos.length === 0) return;
+    setIsFetchingAll(true);
+    try {
+      const results = await window.gitViewer.fetchAllRepos(
+        orderedRepos.map((r) => ({ id: r.id, name: r.name, path: r.path }))
+      );
+      await refreshWorkspace(rootPath, true);
+      const updated = results.filter((r) => r.status === 'updated').length;
+      const errors = results.filter((r) => r.status === 'error');
+      if (errors.length > 0) {
+        showToast(
+          'error',
+          `Fetched ${results.length} repo(s); ${errors.length} failed (${errors[0].repoName}: ${errors[0].error})`
+        );
+      } else {
+        showToast(
+          'success',
+          `Fetched ${results.length} repo(s)${updated > 0 ? ` — ${updated} had updates` : ' (all up to date)'}.`
+        );
+      }
+    } finally {
+      setIsFetchingAll(false);
+    }
+  };
+
+  const handleRunUpdateProject = async (
+    targetRepos: RepoSummary[],
+    options: { strategy: UpdateStrategy; autoStash: boolean }
+  ): Promise<RepoBatchResultItem[]> => {
+    const results = await window.gitViewer.updateProjectRepos(
+      targetRepos.map((r) => ({ id: r.id, name: r.name, path: r.path })),
+      options
+    );
+    await refreshWorkspace(rootPath, true);
+    return results;
+  };
 
   const toggleCheck = (key: string) => {
     if (heldKeys.has(key)) return;
@@ -988,49 +1141,201 @@ export const App: React.FC = () => {
     <div className="app-shell">
       <div className="top-bar">
         <div className="top-bar-left">
-          <div className="app-title">
-            <GitCompare size={16} style={{ color: 'var(--accent)' }} />
-            <span>Git Multi-Repo Viewer</span>
+          <div className="toolbar-group">
+            <span
+              title="Git Multi-Repo Viewer"
+              style={{ display: 'inline-flex', alignItems: 'center' }}
+            >
+              <GitCompare
+                size={16}
+                style={{ color: 'var(--accent)', flexShrink: 0 }}
+              />
+            </span>
+            <div className="workspace-picker" ref={workspaceMenuRef}>
+              <button
+                type="button"
+                className={`btn workspace-pill-btn ${workspaceMenuOpen ? 'active' : ''}`}
+                onClick={() => setWorkspaceMenuOpen((v) => !v)}
+                title={
+                  rootPath
+                    ? `Workspace: ${rootPath} (click to switch or open another folder)`
+                    : 'Select or switch workspace folder'
+                }
+              >
+                <FolderOpen
+                  size={13}
+                  style={{ color: 'var(--accent)', flexShrink: 0 }}
+                />
+                <span className="workspace-pill-path">
+                  {rootPath || 'Open Workspace...'}
+                </span>
+                <ChevronDown size={13} style={{ flexShrink: 0, opacity: 0.75 }} />
+              </button>
+
+              {workspaceMenuOpen && (
+                <div className="workspace-dropdown">
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    onClick={() => void handleOpenFolderInCurrent()}
+                  >
+                    <FolderOpen size={14} /> Open Folder...
+                  </button>
+                  <button
+                    type="button"
+                    className="context-menu-item"
+                    onClick={() => void handleOpenFolderInNewWindow()}
+                  >
+                    <ExternalLink size={14} /> Open Folder in New Window...
+                  </button>
+
+                  {recentRoots.length > 0 && (
+                    <>
+                      <div className="context-menu-divider" />
+                      <div className="workspace-dropdown-label">
+                        Recent Workspaces
+                      </div>
+                      <div className="workspace-dropdown-recent">
+                        {recentRoots.map((recent) => {
+                          const isCurrent =
+                            recent.toLowerCase() === rootPath.toLowerCase();
+                          return (
+                            <div
+                              key={recent}
+                              className={`workspace-recent-row ${isCurrent ? 'active' : ''}`}
+                              onClick={() => {
+                                setWorkspaceMenuOpen(false);
+                                if (!isCurrent) {
+                                  void openRootInCurrentWindow(recent);
+                                }
+                              }}
+                              title={recent}
+                            >
+                              <span className="workspace-recent-check">
+                                {isCurrent && <Check size={12} />}
+                              </span>
+                              <span className="workspace-recent-path">
+                                {recent}
+                              </span>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                style={{ width: 22, height: 22 }}
+                                title="Open in New Window"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setWorkspaceMenuOpen(false);
+                                  handleOpenRepoInNewWindow(recent);
+                                }}
+                              >
+                                <ExternalLink size={12} />
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                style={{ width: 22, height: 22 }}
+                                title="Remove from recent list"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  removeRecentRoot(recent);
+                                }}
+                              >
+                                <X size={12} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
-          <button className="btn" onClick={() => void handleOpenFolder()}>
-            <FolderOpen size={13} /> Open Root
-          </button>
-          <div className="root-path-pill" title={rootPath}>
-            {rootPath || 'No folder selected'}
+
+          <div className="toolbar-divider" />
+
+          <div className="toolbar-group">
+            <button
+              className="btn"
+              onClick={() => void handleFetchAll()}
+              disabled={isFetchingAll || isScanning || repos.length === 0}
+              title="Fetch All: run git fetch --all --prune across all discovered repos"
+            >
+              <CloudDownload
+                size={13}
+                className={isFetchingAll ? 'spin' : ''}
+              />
+              {isFetchingAll ? 'Fetching...' : 'Fetch All'}
+            </button>
+
+            <button
+              className="btn"
+              onClick={() => setUpdateModalOpen(true)}
+              disabled={repos.length === 0}
+              title="Update Project: Fetch & Pull latest code across all repos (Ctrl+T)"
+            >
+              <Download size={13} />
+              Update Project
+            </button>
+
+            <button
+              className="btn"
+              onClick={() => setBatchBranchModalOpen(true)}
+              disabled={repos.length === 0}
+              title="Switch branches across multiple repositories"
+            >
+              <GitBranch size={13} />
+              Branches
+            </button>
+
+            {baselineTimestamp ? (
+              <span className="stat-pill highlight">
+                <Flag size={11} />
+                Baseline active
+                <span
+                  title="Clear Harness baseline"
+                  onClick={handleClearBaseline}
+                  style={{
+                    cursor: 'pointer',
+                    marginLeft: 2,
+                    display: 'inline-flex',
+                    alignItems: 'center'
+                  }}
+                >
+                  <X size={12} />
+                </span>
+              </span>
+            ) : (
+              <button
+                className="btn"
+                onClick={handleSetBaseline}
+                disabled={repos.length === 0}
+                title="Snapshot current HEAD across all repos to track what your AI harness commits next"
+              >
+                <Flag size={13} /> Set Baseline
+              </button>
+            )}
           </div>
         </div>
 
         <div className="top-bar-right">
           <span className="stat-pill">{repos.length} repos</span>
           <span className="stat-pill">
-            {totals.dirtyFiles} changed ({totals.dirtyRepos} repos)
+            {totals.dirtyFiles} changed ({totals.dirtyRepos})
           </span>
           {totals.unpushedCommits > 0 && (
             <span className="stat-pill" style={{ color: 'var(--badge-unpushed)' }}>
-              ↑{totals.unpushedCommits} unpushed
+              ↑{totals.unpushedCommits} ahead
+            </span>
+          )}
+          {totals.behindCommits > 0 && (
+            <span className="stat-pill" style={{ color: 'var(--accent)' }}>
+              ↓{totals.behindCommits} behind
             </span>
           )}
 
-          {baselineTimestamp ? (
-            <span className="stat-pill highlight">
-              <Flag size={11} />
-              Baseline active
-              <X
-                size={12}
-                style={{ cursor: 'pointer', marginLeft: 2 }}
-                onClick={handleClearBaseline}
-              />
-            </span>
-          ) : (
-            <button
-              className="btn"
-              onClick={handleSetBaseline}
-              disabled={repos.length === 0}
-              title="Snapshot current HEAD across all repos to track what your AI harness commits next"
-            >
-              <Flag size={13} /> Set Baseline
-            </button>
-          )}
+          <div className="toolbar-divider" />
 
           <button
             className={`btn ${autoScanEnabled ? 'btn-primary' : ''}`}
@@ -1322,6 +1627,7 @@ export const App: React.FC = () => {
               onSkipWorktree={handleSkipWorktree}
               onRestoreSkipWorktreeRepo={handleRestoreSkipWorktreeRepo}
               onRemoteAction={handleRemoteAction}
+              onOpenBranchModal={setBranchTargetRepo}
               onCopyHarnessPlan={handleCopyHarnessPlan}
               onOpenRepoInNewWindow={handleOpenRepoInNewWindow}
               onReorderRepo={handleReorderRepo}
@@ -1373,6 +1679,9 @@ export const App: React.FC = () => {
               onSkipWorktree={(repo, paths, skip) =>
                 handleSkipWorktree(repo, paths, skip)
               }
+              onRemoteAction={handleRemoteAction}
+              onRestoreSkipWorktreeRepo={handleRestoreSkipWorktreeRepo}
+              onOpenBranchModal={setBranchTargetRepo}
             />
           )}
 
@@ -1463,6 +1772,30 @@ export const App: React.FC = () => {
           fontPreferences={fontPreferences}
           onChangeFonts={setFontPreferences}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {updateModalOpen && (
+        <UpdateProjectModal
+          repos={orderedRepos}
+          onRunUpdate={handleRunUpdateProject}
+          onClose={() => setUpdateModalOpen(false)}
+        />
+      )}
+
+      {branchTargetRepo && (
+        <RepoBranchModal
+          repo={branchTargetRepo}
+          onCheckout={handleCheckoutSingleBranch}
+          onClose={() => setBranchTargetRepo(null)}
+        />
+      )}
+
+      {batchBranchModalOpen && (
+        <BatchBranchModal
+          repos={orderedRepos}
+          onRunSwitchAll={handleBatchCheckoutBranches}
+          onClose={() => setBatchBranchModalOpen(false)}
         />
       )}
     </div>

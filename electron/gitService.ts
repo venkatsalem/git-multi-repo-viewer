@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import {
+  BranchListResult,
   ChangedFile,
   CommitActionTarget,
   CommitFileChange,
@@ -16,8 +17,11 @@ import {
   GitRemoteActionResult,
   IgnoreFileResult,
   IgnoreTarget,
+  RepoBatchResultItem,
+  RepoBatchTarget,
   RepoRefs,
   RepoSummary,
+  UpdateProjectOptions,
   WorkspaceScanResult
 } from '../shared/types';
 import { detectLanguage } from './language';
@@ -953,4 +957,384 @@ export async function runGitRemoteAction(
       error: err instanceof Error ? err.message : String(err)
     };
   }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+  async function runWorker(): Promise<void> {
+    while (nextIdx < items.length) {
+      const idx = nextIdx;
+      nextIdx += 1;
+      results[idx] = await worker(items[idx]);
+    }
+  }
+  const workerCount = Math.min(limit, Math.max(1, items.length));
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+  return results;
+}
+
+async function runGitWithPromptDisabled(
+  repoPath: string,
+  args: string[]
+): Promise<{ stdout: string; stderr: string }> {
+  const { stdout, stderr } = await execFileAsync(
+    'git',
+    ['-c', 'core.quotepath=false', ...args],
+    {
+      cwd: repoPath,
+      maxBuffer: GIT_MAX_BUFFER,
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    }
+  );
+  return { stdout: stdout ?? '', stderr: stderr ?? '' };
+}
+
+export async function fetchAllRepos(
+  repos: RepoBatchTarget[]
+): Promise<RepoBatchResultItem[]> {
+  return mapWithConcurrency(repos, 6, async (repo) => {
+    try {
+      const remotesRaw = (await runGit(repo.path, ['remote'])).trim();
+      if (!remotesRaw) {
+        return {
+          repoId: repo.id,
+          repoName: repo.name,
+          repoPath: repo.path,
+          status: 'skipped',
+          summary: 'No git remotes configured'
+        };
+      }
+      const { stdout, stderr } = await runGitWithPromptDisabled(repo.path, [
+        'fetch',
+        '--all',
+        '--prune'
+      ]);
+      const combined = `${stdout}\n${stderr}`.trim();
+      const updated = combined.length > 0;
+      return {
+        repoId: repo.id,
+        repoName: repo.name,
+        repoPath: repo.path,
+        status: updated ? 'updated' : 'up-to-date',
+        summary: updated ? combined.split(/\r?\n/)[0] : 'Already up to date'
+      };
+    } catch (err) {
+      return {
+        repoId: repo.id,
+        repoName: repo.name,
+        repoPath: repo.path,
+        status: 'error',
+        summary: 'Fetch failed',
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  });
+}
+
+export async function updateProjectRepos(
+  repos: RepoBatchTarget[],
+  options: UpdateProjectOptions
+): Promise<RepoBatchResultItem[]> {
+  return mapWithConcurrency(repos, 6, async (repo) => {
+    try {
+      let upstream = '';
+      try {
+        upstream = (
+          await runGit(repo.path, [
+            'rev-parse',
+            '--abbrev-ref',
+            '--symbolic-full-name',
+            '@{u}'
+          ])
+        ).trim();
+      } catch {
+        upstream = '';
+      }
+
+      if (!upstream) {
+        return {
+          repoId: repo.id,
+          repoName: repo.name,
+          repoPath: repo.path,
+          status: 'skipped',
+          summary: 'No upstream tracking branch'
+        };
+      }
+
+      await runGitWithPromptDisabled(repo.path, ['fetch', '--prune']);
+      const behindCount = Number(
+        (
+          await runGit(repo.path, ['rev-list', '--count', 'HEAD..@{u}'])
+        ).trim() || '0'
+      );
+
+      if (behindCount === 0) {
+        return {
+          repoId: repo.id,
+          repoName: repo.name,
+          repoPath: repo.path,
+          status: 'up-to-date',
+          summary: `Up to date with ${upstream}`
+        };
+      }
+
+      const pullArgs = ['pull'];
+      if (options.strategy === 'rebase') {
+        pullArgs.push('--rebase');
+      } else if (options.strategy === 'ff-only') {
+        pullArgs.push('--ff-only');
+      } else {
+        pullArgs.push('--no-edit');
+      }
+      if (options.autoStash && options.strategy !== 'ff-only') {
+        pullArgs.push('--autostash');
+      }
+
+      await runGitWithPromptDisabled(repo.path, pullArgs);
+      return {
+        repoId: repo.id,
+        repoName: repo.name,
+        repoPath: repo.path,
+        status: 'updated',
+        summary: `Pulled ${behindCount} commit(s) from ${upstream}`
+      };
+    } catch (err) {
+      return {
+        repoId: repo.id,
+        repoName: repo.name,
+        repoPath: repo.path,
+        status: 'error',
+        summary: 'Pull failed',
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  });
+}
+
+export async function getRepoBranches(repoPath: string): Promise<BranchListResult> {
+  const [currentRaw, localRaw, remoteRaw] = await Promise.all([
+    runGit(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => ''),
+    runGit(repoPath, [
+      'for-each-ref',
+      '--format=%(refname:short)',
+      '--sort=-committerdate',
+      'refs/heads'
+    ]).catch(() => ''),
+    runGit(repoPath, [
+      'for-each-ref',
+      '--format=%(refname:short)',
+      '--sort=-committerdate',
+      'refs/remotes'
+    ]).catch(() => '')
+  ]);
+
+  const local = localRaw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const remote = remoteRaw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => Boolean(s) && !s.endsWith('/HEAD'));
+
+  return {
+    current: currentRaw.trim(),
+    local,
+    remote
+  };
+}
+
+async function runSwitchOrCheckout(
+  repoPath: string,
+  switchArgs: string[],
+  checkoutArgs: string[]
+): Promise<void> {
+  try {
+    await runGit(repoPath, switchArgs);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("is not a git command") || msg.includes('unknown option')) {
+      await runGit(repoPath, checkoutArgs);
+    } else {
+      throw err;
+    }
+  }
+}
+
+export async function checkoutBranchInRepo(
+  repoPath: string,
+  targetBranch: string,
+  options?: { createNew?: boolean; isRemote?: boolean }
+): Promise<{ branch: string; summary: string }> {
+  const clean = targetBranch.trim();
+  if (!clean) {
+    throw new Error('Branch name cannot be empty.');
+  }
+
+  if (options?.createNew) {
+    await runSwitchOrCheckout(
+      repoPath,
+      ['switch', '-c', clean],
+      ['checkout', '-b', clean]
+    );
+    return { branch: clean, summary: `Created and switched to ${clean}` };
+  }
+
+  if (options?.isRemote) {
+    const slashIdx = clean.indexOf('/');
+    const localName = slashIdx >= 0 ? clean.slice(slashIdx + 1) : clean;
+    const localExists = await runGit(repoPath, [
+      'show-ref',
+      '--verify',
+      '--quiet',
+      `refs/heads/${localName}`
+    ])
+      .then(() => true)
+      .catch(() => false);
+
+    if (localExists) {
+      await runSwitchOrCheckout(
+        repoPath,
+        ['switch', localName],
+        ['checkout', localName]
+      );
+      return { branch: localName, summary: `Switched to ${localName}` };
+    }
+
+    await runSwitchOrCheckout(
+      repoPath,
+      ['switch', '-c', localName, '--track', clean],
+      ['checkout', '-t', clean]
+    );
+    return {
+      branch: localName,
+      summary: `Switched to ${localName} (tracking ${clean})`
+    };
+  }
+
+  await runSwitchOrCheckout(repoPath, ['switch', clean], ['checkout', clean]);
+  return { branch: clean, summary: `Switched to ${clean}` };
+}
+
+export async function checkoutBranchAcrossRepos(
+  repos: RepoBatchTarget[],
+  targetBranch: string,
+  createIfMissing: boolean
+): Promise<RepoBatchResultItem[]> {
+  const clean = targetBranch.trim();
+  if (!clean) {
+    throw new Error('Target branch cannot be empty.');
+  }
+
+  return mapWithConcurrency(repos, 6, async (repo) => {
+    try {
+      const current = (
+        await runGit(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(
+          () => ''
+        )
+      ).trim();
+      if (current === clean) {
+        return {
+          repoId: repo.id,
+          repoName: repo.name,
+          repoPath: repo.path,
+          status: 'up-to-date',
+          summary: `Already on ${clean}`
+        };
+      }
+
+      const localExists = await runGit(repo.path, [
+        'show-ref',
+        '--verify',
+        '--quiet',
+        `refs/heads/${clean}`
+      ])
+        .then(() => true)
+        .catch(() => false);
+
+      if (localExists) {
+        await runSwitchOrCheckout(
+          repo.path,
+          ['switch', clean],
+          ['checkout', clean]
+        );
+        return {
+          repoId: repo.id,
+          repoName: repo.name,
+          repoPath: repo.path,
+          status: 'updated',
+          summary: `Switched to ${clean}`
+        };
+      }
+
+      const remotesRaw = (
+        await runGit(repo.path, [
+          'for-each-ref',
+          '--format=%(refname:short)',
+          'refs/remotes'
+        ]).catch(() => '')
+      )
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter((s) => Boolean(s) && !s.endsWith('/HEAD'));
+
+      const remoteMatch =
+        remotesRaw.find((r) => r === `origin/${clean}`) ??
+        remotesRaw.find((r) => r.endsWith(`/${clean}`));
+
+      if (remoteMatch) {
+        await runSwitchOrCheckout(
+          repo.path,
+          ['switch', '-c', clean, '--track', remoteMatch],
+          ['checkout', '-t', remoteMatch]
+        );
+        return {
+          repoId: repo.id,
+          repoName: repo.name,
+          repoPath: repo.path,
+          status: 'updated',
+          summary: `Checked out ${clean} (tracking ${remoteMatch})`
+        };
+      }
+
+      if (createIfMissing) {
+        await runSwitchOrCheckout(
+          repo.path,
+          ['switch', '-c', clean],
+          ['checkout', '-b', clean]
+        );
+        return {
+          repoId: repo.id,
+          repoName: repo.name,
+          repoPath: repo.path,
+          status: 'updated',
+          summary: `Created new branch ${clean}`
+        };
+      }
+
+      return {
+        repoId: repo.id,
+        repoName: repo.name,
+        repoPath: repo.path,
+        status: 'skipped',
+        summary: `Branch "${clean}" not found`
+      };
+    } catch (err) {
+      return {
+        repoId: repo.id,
+        repoName: repo.name,
+        repoPath: repo.path,
+        status: 'error',
+        summary: 'Checkout failed',
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  });
 }

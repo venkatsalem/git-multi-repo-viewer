@@ -113,6 +113,34 @@ export interface GitRemoteActionResult {
   error?: string;
 }
 
+export type UpdateStrategy = 'merge' | 'rebase' | 'ff-only';
+
+export interface UpdateProjectOptions {
+  strategy: UpdateStrategy;
+  autoStash: boolean;
+}
+
+export interface RepoBatchTarget {
+  id: string;
+  name: string;
+  path: string;
+}
+
+export interface RepoBatchResultItem {
+  repoId: string;
+  repoName: string;
+  repoPath: string;
+  status: 'updated' | 'up-to-date' | 'skipped' | 'error';
+  summary: string;
+  error?: string;
+}
+
+export interface BranchListResult {
+  current: string;
+  local: string[];
+  remote: string[];
+}
+
 export interface RepoRefs {
   branches: string[];
   tags: string[];

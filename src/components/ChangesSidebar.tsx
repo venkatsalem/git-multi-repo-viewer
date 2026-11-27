@@ -17,6 +17,7 @@ import {
   FolderOpen,
   FolderTree,
   GitBranch,
+  GitCommitHorizontal,
   List,
   MinusCircle,
   PauseCircle,
@@ -29,7 +30,8 @@ import {
   SquareMinus,
   SquarePlus,
   Terminal,
-  Upload
+  Upload,
+  X
 } from 'lucide-react';
 import { ChangedFile, IgnoreTarget, RepoSummary } from '../../shared/types';
 import {
@@ -90,6 +92,7 @@ interface ChangesSidebarProps {
     repo: RepoSummary,
     action: 'fetch' | 'pull' | 'push'
   ) => Promise<void>;
+  onOpenBranchModal: (repo: RepoSummary) => void;
   onCopyHarnessPlan: (repoScope?: RepoSummary) => void;
   onOpenRepoInNewWindow: (repoPath: string) => void;
   onReorderRepo: (
@@ -141,6 +144,7 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
   onSkipWorktree,
   onRestoreSkipWorktreeRepo,
   onRemoteAction,
+  onOpenBranchModal,
   onCopyHarnessPlan,
   onOpenRepoInNewWindow,
   onReorderRepo,
@@ -153,6 +157,8 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const [commitMessage, setCommitMessage] = useState('');
+  const [commitModalOpen, setCommitModalOpen] = useState(false);
+  const [commitMode, setCommitMode] = useState<'checked' | 'staged'>('checked');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [isDiscardingChecked, setIsDiscardingChecked] = useState(false);
 
@@ -198,16 +204,24 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
   }, [contextMenu, repoContextMenu]);
 
   useEffect(() => {
-    if (!revertTarget && !confirmDiscard) return;
+    if (!revertTarget && !confirmDiscard && !commitModalOpen) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (revertTarget && !isRevertingSingle) setRevertTarget(null);
         if (confirmDiscard && !isDiscardingChecked) setConfirmDiscard(false);
+        if (commitModalOpen && !isCommitting) setCommitModalOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [revertTarget, isRevertingSingle, confirmDiscard, isDiscardingChecked]);
+  }, [
+    revertTarget,
+    isRevertingSingle,
+    confirmDiscard,
+    isDiscardingChecked,
+    commitModalOpen,
+    isCommitting
+  ]);
 
   const filterCounts = useMemo(() => {
     let all = 0;
@@ -311,18 +325,18 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
     };
   }, [repos, checkedKeys, heldKeys]);
 
-  const stagedRepoCount = useMemo(() => {
-    let count = 0;
+  const stagedSummary = useMemo(() => {
+    const repoIds = new Set<string>();
+    const items: Array<{ repoName: string; path: string }> = [];
     for (const r of repos) {
-      if (
-        r.changes.some(
-          (c) => c.staged && !heldKeys.has(makeChangeKey(r.id, c.path))
-        )
-      ) {
-        count += 1;
+      for (const c of r.changes) {
+        if (c.staged && !heldKeys.has(makeChangeKey(r.id, c.path))) {
+          repoIds.add(r.id);
+          items.push({ repoName: r.name, path: c.path });
+        }
       }
     }
-    return count;
+    return { repoCount: repoIds.size, items };
   }, [repos, heldKeys]);
 
   const toggleRepoExpand = (repoId: string) => {
@@ -384,16 +398,28 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
     setExpandedDirs(new Set());
   };
 
-  const handleCommit = async () => {
-    if (!commitMessage.trim() || checkedSummary.fileCount === 0) return;
-    await onCommitChecked(commitMessage);
-    setCommitMessage('');
+  const openCommitDialog = () => {
+    if (checkedSummary.fileCount > 0) {
+      setCommitMode('checked');
+    } else if (stagedSummary.items.length > 0) {
+      setCommitMode('staged');
+    } else {
+      return;
+    }
+    setCommitModalOpen(true);
   };
 
-  const handleCommitStagedOnly = async () => {
-    if (!commitMessage.trim() || filterCounts.staged === 0) return;
-    await onCommitStaged(commitMessage);
+  const handleSubmitCommitModal = async () => {
+    if (!commitMessage.trim()) return;
+    if (commitMode === 'staged') {
+      if (stagedSummary.items.length === 0) return;
+      await onCommitStaged(commitMessage);
+    } else {
+      if (checkedSummary.fileCount === 0) return;
+      await onCommitChecked(commitMessage);
+    }
     setCommitMessage('');
+    setCommitModalOpen(false);
   };
 
   const handleConfirmSingleRevert = async () => {
@@ -557,7 +583,7 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
                 baselineMap[repo.id] !== repo.headSha;
 
               const isDirtyOrAhead =
-                repo.changes.length > 0 || repo.ahead > 0;
+                repo.changes.length > 0 || repo.ahead > 0 || repo.behind > 0;
               const dropClass =
                 dropIndicator?.repoId === repo.id
                   ? `drop-${dropIndicator.position}`
@@ -692,10 +718,18 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
                   <span className="repo-name" title={repo.path}>
                     {repo.name}
                   </span>
-                  <span className="branch-tag" title={repo.branch}>
+                  <button
+                    type="button"
+                    className="branch-tag clickable"
+                    title={`${repo.branch} — Click to switch or create branch`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenBranchModal(repo);
+                    }}
+                  >
                     <GitBranch size={10} />
                     {repo.branch}
-                  </span>
+                  </button>
                   <span style={{ flex: 1 }} />
                   {baselineChanged && (
                     <span
@@ -711,6 +745,14 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
                       title={`${repo.ahead} unpushed commit(s)`}
                     >
                       ↑{repo.ahead}
+                    </span>
+                  )}
+                  {repo.behind > 0 && (
+                    <span
+                      className="count-pill behind"
+                      title={`${repo.behind} incoming commit(s) behind upstream`}
+                    >
+                      ↓{repo.behind}
                     </span>
                   )}
                   {stagedChanges.length > 0 && (
@@ -1116,91 +1158,71 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
         )}
       </div>
 
-      <div className="commit-box">
-        <textarea
-          value={commitMessage}
-          onChange={(e) => setCommitMessage(e.target.value)}
-          placeholder="Commit message for checked files..."
-          onKeyDown={(e) => {
-            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-              void handleCommit();
+      <div className="commit-action-bar">
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          <button
+            className="btn"
+            disabled={checkedSummary.fileCount === 0 || isCommitting}
+            onClick={() => void onStageChecked()}
+            title="Stage checked files"
+          >
+            Stage
+          </button>
+          <button
+            className="btn"
+            disabled={checkedSummary.fileCount === 0 || isCommitting}
+            onClick={() => void onUnstageChecked()}
+            title="Unstage checked files"
+          >
+            Unstage
+          </button>
+          <button
+            className="btn"
+            disabled={checkedSummary.fileCount === 0 || isCommitting}
+            onClick={() =>
+              onToggleHoldMany(checkedSummary.checkedKeyList, true)
             }
-          }}
-        />
-        <div className="commit-box-footer" style={{ flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            <button
-              className="btn"
-              disabled={checkedSummary.fileCount === 0 || isCommitting}
-              onClick={() => void onStageChecked()}
-              title="Stage checked files"
-            >
-              Stage
-            </button>
-            <button
-              className="btn"
-              disabled={checkedSummary.fileCount === 0 || isCommitting}
-              onClick={() => void onUnstageChecked()}
-              title="Unstage checked files"
-            >
-              Unstage
-            </button>
-            <button
-              className="btn"
-              disabled={checkedSummary.fileCount === 0 || isCommitting}
-              onClick={() =>
-                onToggleHoldMany(checkedSummary.checkedKeyList, true)
-              }
-              title="Flag checked files as Hold (Do Not Commit)"
-            >
-              <Ban size={12} /> Hold
-            </button>
-            <button
-              className="btn btn-danger"
-              disabled={checkedSummary.fileCount === 0 || isCommitting}
-              onClick={() => setConfirmDiscard(true)}
-              title="Discard changes for checked files..."
-            >
-              <RotateCcw size={12} />
-            </button>
-            <button
-              className="btn"
-              disabled={repos.length === 0}
-              onClick={() => onCopyHarnessPlan()}
-              title="Copy structured commit / ignore list for AI Harness to clipboard"
-            >
-              <ClipboardList size={12} /> Plan
-            </button>
-          </div>
-          <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
-            {filterCounts.staged > 0 && (
-              <button
-                className="btn"
-                disabled={!commitMessage.trim() || isCommitting}
-                onClick={() => void handleCommitStagedOnly()}
-                title={`Commit ONLY staged changes across ${stagedRepoCount} repo(s) without adding unstaged files`}
-              >
-                Commit Staged ({filterCounts.staged})
-              </button>
-            )}
-            <button
-              className="btn btn-primary"
-              disabled={
-                checkedSummary.fileCount === 0 ||
-                !commitMessage.trim() ||
-                isCommitting
-              }
-              onClick={() => void handleCommit()}
-              title="Ctrl+Enter to commit checked files per repo"
-            >
-              Commit ({checkedSummary.fileCount}
-              {checkedSummary.repoCount > 1
-                ? ` / ${checkedSummary.repoCount} repos`
-                : ''}
-              )
-            </button>
-          </div>
+            title="Flag checked files as Hold (Do Not Commit)"
+          >
+            <Ban size={12} /> Hold
+          </button>
+          <button
+            className="btn btn-danger"
+            disabled={checkedSummary.fileCount === 0 || isCommitting}
+            onClick={() => setConfirmDiscard(true)}
+            title="Discard changes for checked files..."
+          >
+            <RotateCcw size={12} />
+          </button>
+          <button
+            className="btn"
+            disabled={repos.length === 0}
+            onClick={() => onCopyHarnessPlan()}
+            title="Copy structured commit / ignore list for AI Harness to clipboard"
+          >
+            <ClipboardList size={12} /> Plan
+          </button>
         </div>
+
+        <button
+          className="btn btn-primary"
+          style={{ marginLeft: 'auto' }}
+          disabled={
+            isCommitting ||
+            (checkedSummary.fileCount === 0 && stagedSummary.items.length === 0)
+          }
+          onClick={openCommitDialog}
+          title="Open Commit dialog for checked or staged files"
+        >
+          <GitCommitHorizontal size={13} />
+          Commit
+          {checkedSummary.fileCount > 0
+            ? ` (${checkedSummary.fileCount})`
+            : stagedSummary.items.length > 0
+              ? ` (${stagedSummary.items.length} staged)`
+              : ''}
+          ...
+        </button>
       </div>
 
       {contextMenu && (
@@ -1492,6 +1514,19 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
             onClick={() => {
               const repo = repoContextMenu.repo;
               setRepoContextMenu(null);
+              onOpenBranchModal(repo);
+            }}
+          >
+            <GitBranch size={14} /> Switch / Create Branch...
+          </button>
+
+          <div className="context-menu-divider" />
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
               void onStageAllRepo(repo);
             }}
           >
@@ -1756,6 +1791,142 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
                   ? 'Discarding...'
                   : `Discard ${checkedSummary.fileCount} File${checkedSummary.fileCount === 1 ? '' : 's'}`}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {commitModalOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!isCommitting) setCommitModalOpen(false);
+          }}
+        >
+          <div
+            className="modal-card commit-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="settings-modal-header">
+              <div className="modal-title">
+                <GitCommitHorizontal
+                  size={17}
+                  style={{ color: 'var(--accent)' }}
+                />
+                <span>Commit Changes</span>
+              </div>
+              <button
+                className="icon-btn"
+                disabled={isCommitting}
+                onClick={() => setCommitModalOpen(false)}
+                title="Close (Esc)"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="update-modal-body">
+              <div className="theme-segmented" style={{ gridTemplateColumns: '1fr 1fr' }}>
+                <button
+                  type="button"
+                  disabled={checkedSummary.fileCount === 0 || isCommitting}
+                  className={`theme-segment-btn ${commitMode === 'checked' ? 'active' : ''}`}
+                  onClick={() => setCommitMode('checked')}
+                  title="Stage & commit all checked files"
+                >
+                  Checked Files ({checkedSummary.fileCount}
+                  {checkedSummary.repoCount > 1
+                    ? ` / ${checkedSummary.repoCount} repos`
+                    : ''}
+                  )
+                </button>
+                <button
+                  type="button"
+                  disabled={stagedSummary.items.length === 0 || isCommitting}
+                  className={`theme-segment-btn ${commitMode === 'staged' ? 'active' : ''}`}
+                  onClick={() => setCommitMode('staged')}
+                  title="Commit ONLY currently staged files without adding unstaged changes"
+                >
+                  Staged Only ({stagedSummary.items.length}
+                  {stagedSummary.repoCount > 1
+                    ? ` / ${stagedSummary.repoCount} repos`
+                    : ''}
+                  )
+                </button>
+              </div>
+
+              <div
+                className="modal-path"
+                style={{
+                  maxHeight: 150,
+                  overflowY: 'auto',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 3
+                }}
+              >
+                {(commitMode === 'staged'
+                  ? stagedSummary.items
+                  : checkedSummary.items
+                ).map((item) => (
+                  <div key={`${item.repoName}::${item.path}`}>
+                    <strong>{item.repoName}</strong> / {item.path}
+                  </div>
+                ))}
+              </div>
+
+              <label className="settings-field">
+                <span>Commit Message</span>
+                <textarea
+                  autoFocus
+                  className="commit-modal-textarea"
+                  value={commitMessage}
+                  disabled={isCommitting}
+                  onChange={(e) => setCommitMessage(e.target.value)}
+                  placeholder="Describe what you are committing..."
+                  onKeyDown={(e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                      e.preventDefault();
+                      void handleSubmitCommitModal();
+                    }
+                  }}
+                />
+              </label>
+            </div>
+
+            <div className="settings-footer">
+              <span
+                style={{
+                  fontSize: '0.885rem',
+                  color: 'var(--text-secondary)'
+                }}
+              >
+                Press Ctrl+Enter to commit
+              </span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="btn"
+                  disabled={isCommitting}
+                  onClick={() => setCommitModalOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-primary"
+                  disabled={
+                    isCommitting ||
+                    !commitMessage.trim() ||
+                    (commitMode === 'staged'
+                      ? stagedSummary.items.length === 0
+                      : checkedSummary.fileCount === 0)
+                  }
+                  onClick={() => void handleSubmitCommitModal()}
+                >
+                  {isCommitting
+                    ? 'Committing...'
+                    : `Commit (${commitMode === 'staged' ? stagedSummary.items.length : checkedSummary.fileCount})`}
+                </button>
+              </div>
             </div>
           </div>
         </div>

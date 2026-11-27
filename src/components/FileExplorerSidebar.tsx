@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
@@ -11,10 +12,12 @@ import {
   FolderTree,
   GitBranch,
   List,
+  RefreshCw,
   Search,
   SquareMinus,
   SquarePlus,
-  Terminal
+  Terminal,
+  Upload
 } from 'lucide-react';
 import { FileEntry, IgnoreTarget, RepoSummary } from '../../shared/types';
 import {
@@ -49,6 +52,12 @@ interface FileExplorerSidebarProps {
     paths: string[],
     skip: boolean
   ) => Promise<void>;
+  onRemoteAction: (
+    repo: RepoSummary,
+    action: 'fetch' | 'pull' | 'push'
+  ) => Promise<void>;
+  onRestoreSkipWorktreeRepo: (repo: RepoSummary) => Promise<void>;
+  onOpenBranchModal: (repo: RepoSummary) => void;
 }
 
 function joinRepoFilePath(repoPath: string, filePath: string): string {
@@ -68,7 +77,10 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
   onOpenRepoInNewWindow,
   onReorderRepo,
   onIgnorePattern,
-  onSkipWorktree
+  onSkipWorktree,
+  onRemoteAction,
+  onRestoreSkipWorktreeRepo,
+  onOpenBranchModal
 }) => {
   const [selectedRepoId, setSelectedRepoId] = useState<string>('ALL');
   const [filterText, setFilterText] = useState('');
@@ -344,11 +356,27 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
                 <span className="repo-name" title={repo.path}>
                   {repo.name}
                 </span>
-                <span className="branch-tag">
+                <button
+                  type="button"
+                  className="branch-tag clickable"
+                  title={`${repo.branch} — Click to switch or create branch`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenBranchModal(repo);
+                  }}
+                >
                   <GitBranch size={10} />
                   {repo.branch}
-                </span>
+                </button>
                 <span style={{ flex: 1 }} />
+                {repo.behind > 0 && (
+                  <span
+                    className="count-pill behind"
+                    title={`${repo.behind} incoming commit(s) behind upstream`}
+                  >
+                    ↓{repo.behind}
+                  </span>
+                )}
                 {loadingRepos.has(repo.id) ? (
                   <span className="count-pill">...</span>
                 ) : filesByRepo[repo.id] ? (
@@ -542,6 +570,72 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
           style={{ left: repoContextMenu.x, top: repoContextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
+              onOpenBranchModal(repo);
+            }}
+          >
+            <GitBranch size={14} /> Switch / Create Branch...
+          </button>
+
+          <div className="context-menu-divider" />
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
+              void onRemoteAction(repo, 'fetch');
+            }}
+          >
+            <RefreshCw size={14} /> Git Fetch (--prune)
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
+              void onRemoteAction(repo, 'pull').then(() => {
+                setFilesByRepo((prev) => {
+                  if (!(repo.id in prev)) return prev;
+                  const next = { ...prev };
+                  delete next[repo.id];
+                  return next;
+                });
+              });
+            }}
+          >
+            <Download size={14} /> Git Pull
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
+              void onRemoteAction(repo, 'push');
+            }}
+          >
+            <Upload size={14} /> Git Push
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
+              void onRestoreSkipWorktreeRepo(repo);
+            }}
+          >
+            <Eye size={14} /> Restore Skip-Worktree Files
+          </button>
+
+          <div className="context-menu-divider" />
+
           <button
             className="context-menu-item"
             onClick={() => {
