@@ -24,6 +24,7 @@ import {
   ChangedFile,
   CommitFileChange,
   CommitInfo,
+  IgnoreTarget,
   RepoSummary
 } from '../shared/types';
 import { ChangesSidebar, makeChangeKey } from './components/ChangesSidebar';
@@ -191,7 +192,25 @@ export const App: React.FC = () => {
   };
 
   const [checkedKeys, setCheckedKeys] = useState<Set<string>>(new Set());
+  const [heldKeys, setHeldKeys] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('gmrv.heldKeys');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return new Set(parsed.filter((x): x is string => typeof x === 'string'));
+        }
+      }
+    } catch {
+      // ignore malformed storage
+    }
+    return new Set();
+  });
   const [isCommitting, setIsCommitting] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem('gmrv.heldKeys', JSON.stringify([...heldKeys]));
+  }, [heldKeys]);
 
   const [commits, setCommits] = useState<CommitInfo[]>([]);
   const [loadingCommits, setLoadingCommits] = useState(false);
@@ -475,6 +494,7 @@ export const App: React.FC = () => {
   }, [repos]);
 
   const toggleCheck = (key: string) => {
+    if (heldKeys.has(key)) return;
     setCheckedKeys((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
@@ -483,8 +503,51 @@ export const App: React.FC = () => {
     });
   };
 
+  const toggleHold = (key: string) => {
+    setHeldKeys((prev) => {
+      const next = new Set(prev);
+      const willHold = !next.has(key);
+      if (willHold) {
+        next.add(key);
+      } else {
+        next.delete(key);
+      }
+      if (willHold) {
+        setCheckedKeys((cPrev) => {
+          if (!cPrev.has(key)) return cPrev;
+          const cNext = new Set(cPrev);
+          cNext.delete(key);
+          return cNext;
+        });
+      }
+      return next;
+    });
+  };
+
+  const toggleHoldMany = (keys: string[], hold: boolean) => {
+    if (keys.length === 0) return;
+    setHeldKeys((prev) => {
+      const next = new Set(prev);
+      for (const k of keys) {
+        if (hold) next.add(k);
+        else next.delete(k);
+      }
+      return next;
+    });
+    if (hold) {
+      setCheckedKeys((prev) => {
+        const next = new Set(prev);
+        for (const k of keys) next.delete(k);
+        return next;
+      });
+    }
+  };
+
   const toggleRepoCheck = (repo: RepoSummary) => {
-    const keys = repo.changes.map((c) => makeChangeKey(repo.id, c.path));
+    const keys = repo.changes
+      .map((c) => makeChangeKey(repo.id, c.path))
+      .filter((k) => !heldKeys.has(k));
+    if (keys.length === 0) return;
     const allChecked = keys.every((k) => checkedKeys.has(k));
     setCheckedKeys((prev) => {
       const next = new Set(prev);
@@ -509,7 +572,8 @@ export const App: React.FC = () => {
       const untrackedPaths: string[] = [];
       const trackedPaths: string[] = [];
       for (const c of repo.changes) {
-        if (checkedKeys.has(makeChangeKey(repo.id, c.path))) {
+        const key = makeChangeKey(repo.id, c.path);
+        if (checkedKeys.has(key) && !heldKeys.has(key)) {
           paths.push(c.path);
           if (c.untracked) untrackedPaths.push(c.path);
           else trackedPaths.push(c.path);
@@ -590,6 +654,234 @@ export const App: React.FC = () => {
         err instanceof Error ? err.message : 'Failed to discard changes'
       );
     }
+  };
+
+  const handleCommitStaged = async (message: string) => {
+    const targets = orderedRepos
+      .filter((r) =>
+        r.changes.some(
+          (c) => c.staged && !heldKeys.has(makeChangeKey(r.id, c.path))
+        )
+      )
+      .map((r) => ({ repoPath: r.path, repoName: r.name }));
+    if (targets.length === 0) return;
+    setIsCommitting(true);
+    try {
+      const results = await window.gitViewer.commitStagedAcrossRepos(
+        targets,
+        message
+      );
+      const okCount = results.filter((r) => r.ok).length;
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        showToast(
+          'error',
+          `Committed staged in ${okCount} repo(s). Failed in ${failed[0].repoName}: ${failed[0].error}`
+        );
+      } else {
+        showToast(
+          'success',
+          `Committed staged changes across ${okCount} repo(s): ${results
+            .map((r) => `${r.repoName}@${r.sha}`)
+            .join(', ')}`
+        );
+      }
+      await refreshWorkspace(rootPath, true);
+    } finally {
+      setIsCommitting(false);
+    }
+  };
+
+  const handleStageAllRepo = async (repo: RepoSummary) => {
+    try {
+      await window.gitViewer.stageAll(repo.path);
+      showToast('success', `Staged all changes in ${repo.name}`);
+      await refreshWorkspace(rootPath, false);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to stage all changes'
+      );
+    }
+  };
+
+  const handleUnstageAllRepo = async (repo: RepoSummary) => {
+    try {
+      await window.gitViewer.unstageAll(repo.path);
+      showToast('success', `Unstaged all changes in ${repo.name}`);
+      await refreshWorkspace(rootPath, false);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to unstage all changes'
+      );
+    }
+  };
+
+  const handleStageManyFiles = async (repo: RepoSummary, paths: string[]) => {
+    if (paths.length === 0) return;
+    await window.gitViewer.stageFiles(repo.path, paths);
+    await refreshWorkspace(rootPath, false);
+  };
+
+  const handleUnstageManyFiles = async (repo: RepoSummary, paths: string[]) => {
+    if (paths.length === 0) return;
+    await window.gitViewer.unstageFiles(repo.path, paths);
+    await refreshWorkspace(rootPath, false);
+  };
+
+  const handleIgnorePattern = async (
+    repo: RepoSummary,
+    pattern: string,
+    target: IgnoreTarget,
+    untrackPaths?: string[],
+    heldKeyToClear?: string
+  ) => {
+    try {
+      const res = await window.gitViewer.ignorePattern(
+        repo.path,
+        pattern,
+        target,
+        untrackPaths
+      );
+      if (heldKeyToClear) {
+        setHeldKeys((prev) => {
+          if (!prev.has(heldKeyToClear)) return prev;
+          const next = new Set(prev);
+          next.delete(heldKeyToClear);
+          return next;
+        });
+      }
+      showToast(
+        'success',
+        res.alreadyPresent
+          ? `${res.pattern} is already in ${res.targetFile}`
+          : `Added ${res.pattern} to ${res.targetFile}`
+      );
+      await refreshWorkspace(rootPath, false);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to update ignore rules'
+      );
+    }
+  };
+
+  const handleSkipWorktree = async (
+    repo: RepoSummary,
+    paths: string[],
+    skip: boolean,
+    heldKeyToClear?: string
+  ) => {
+    try {
+      await window.gitViewer.setSkipWorktree(repo.path, paths, skip);
+      if (heldKeyToClear) {
+        setHeldKeys((prev) => {
+          if (!prev.has(heldKeyToClear)) return prev;
+          const next = new Set(prev);
+          next.delete(heldKeyToClear);
+          return next;
+        });
+      }
+      showToast(
+        'success',
+        skip
+          ? `Marked ${paths.join(', ')} as --skip-worktree (local changes ignored)`
+          : `Cleared --skip-worktree for ${paths.length} file(s)`
+      );
+      await refreshWorkspace(rootPath, false);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to update skip-worktree flag'
+      );
+    }
+  };
+
+  const handleRestoreSkipWorktreeRepo = async (repo: RepoSummary) => {
+    try {
+      const files = await window.gitViewer.getSkipWorktreeFiles(repo.path);
+      if (files.length === 0) {
+        showToast('success', `No --skip-worktree files found in ${repo.name}`);
+        return;
+      }
+      await window.gitViewer.setSkipWorktree(repo.path, files, false);
+      showToast(
+        'success',
+        `Restored ${files.length} --skip-worktree file(s) in ${repo.name}`
+      );
+      await refreshWorkspace(rootPath, false);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to restore skip-worktree files'
+      );
+    }
+  };
+
+  const handleRemoteAction = async (
+    repo: RepoSummary,
+    action: 'fetch' | 'pull' | 'push'
+  ) => {
+    try {
+      const res = await window.gitViewer.remoteAction(repo.path, action);
+      if (res.ok) {
+        showToast('success', `${repo.name}: git ${action} succeeded`);
+        await refreshWorkspace(rootPath, true);
+      } else {
+        showToast('error', `${repo.name} git ${action} failed: ${res.error}`);
+      }
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : `git ${action} failed`
+      );
+    }
+  };
+
+  const handleCopyHarnessPlan = (repoScope?: RepoSummary) => {
+    const scope = repoScope
+      ? [repoScope]
+      : orderedRepos.filter((r) => r.changes.length > 0);
+    if (scope.length === 0) {
+      showToast('error', 'No changed files to export for Harness.');
+      return;
+    }
+
+    const blocks: string[] = [];
+    for (const repo of scope) {
+      const includeList: string[] = [];
+      const excludeList: string[] = [];
+      for (const c of repo.changes) {
+        const key = makeChangeKey(repo.id, c.path);
+        const isHeld = heldKeys.has(key);
+        const isChecked = checkedKeys.has(key);
+        if (isHeld) {
+          excludeList.push(`${c.path} (held / do not commit)`);
+        } else if (c.staged || isChecked) {
+          includeList.push(`${c.path}${c.staged ? ' [staged]' : ''}`);
+        } else {
+          excludeList.push(`${c.path} (unstaged / leave untouched)`);
+        }
+      }
+      if (includeList.length === 0 && excludeList.length === 0) continue;
+      const lines: string[] = [`Repo: ${repo.name} (${repo.path})`];
+      lines.push(
+        includeList.length > 0
+          ? `  COMMIT ONLY:\n${includeList.map((f) => `    - ${f}`).join('\n')}`
+          : '  COMMIT ONLY: (none)'
+      );
+      if (excludeList.length > 0) {
+        lines.push(
+          `  DO NOT COMMIT / LEAVE UNTOUCHED:\n${excludeList.map((f) => `    - ${f}`).join('\n')}`
+        );
+      }
+      blocks.push(lines.join('\n'));
+    }
+
+    const promptText = `Git commit instructions — commit ONLY the approved files listed below and leave all excluded files untouched:\n\n${blocks.join('\n\n')}`;
+    void navigator.clipboard.writeText(promptText);
+    showToast('success', 'Copied Harness commit / ignore instructions to clipboard.');
   };
 
   const handleStageFile = async (repo: RepoSummary, file: ChangedFile) => {
@@ -972,16 +1264,28 @@ export const App: React.FC = () => {
               viewMode={viewMode}
               onChangeViewMode={setViewMode}
               selectedChangeKey={selectedChangeKey}
+              selectedChangePreset={
+                viewerState?.mode === 'working-diff'
+                  ? viewerState.preset
+                  : undefined
+              }
               checkedKeys={checkedKeys}
+              heldKeys={heldKeys}
               onToggleCheck={toggleCheck}
               onToggleRepoCheck={toggleRepoCheck}
-              onSelectChange={(repo, file: ChangedFile) => {
+              onToggleHold={toggleHold}
+              onToggleHoldMany={toggleHoldMany}
+              onSelectChange={(repo, file: ChangedFile, preferredPreset) => {
                 setViewerState({
                   mode: 'working-diff',
                   repo,
                   filePath: file.path,
                   oldPath: file.oldPath,
-                  preset: 'head-working'
+                  preset:
+                    preferredPreset ??
+                    (file.staged && !file.unstaged
+                      ? 'head-staged'
+                      : 'head-working')
                 });
               }}
               onCompareWithA={(repo, filePath) =>
@@ -1003,12 +1307,22 @@ export const App: React.FC = () => {
                 })
               }
               onCommitChecked={handleCommitChecked}
+              onCommitStaged={handleCommitStaged}
               onDiscardChecked={handleDiscardChecked}
               onStageChecked={handleStageChecked}
               onUnstageChecked={handleUnstageChecked}
               onStageFile={handleStageFile}
               onUnstageFile={handleUnstageFile}
+              onStageAllRepo={handleStageAllRepo}
+              onUnstageAllRepo={handleUnstageAllRepo}
+              onStageManyFiles={handleStageManyFiles}
+              onUnstageManyFiles={handleUnstageManyFiles}
               onRevertFile={handleRevertFile}
+              onIgnorePattern={handleIgnorePattern}
+              onSkipWorktree={handleSkipWorktree}
+              onRestoreSkipWorktreeRepo={handleRestoreSkipWorktreeRepo}
+              onRemoteAction={handleRemoteAction}
+              onCopyHarnessPlan={handleCopyHarnessPlan}
               onOpenRepoInNewWindow={handleOpenRepoInNewWindow}
               onReorderRepo={handleReorderRepo}
               isCommitting={isCommitting}
@@ -1053,6 +1367,12 @@ export const App: React.FC = () => {
               }
               onOpenRepoInNewWindow={handleOpenRepoInNewWindow}
               onReorderRepo={handleReorderRepo}
+              onIgnorePattern={(repo, pattern, target, untrackPaths) =>
+                handleIgnorePattern(repo, pattern, target, untrackPaths)
+              }
+              onSkipWorktree={(repo, paths, skip) =>
+                handleSkipWorktree(repo, paths, skip)
+              }
             />
           )}
 

@@ -5,16 +5,18 @@ import {
   Copy,
   ExternalLink,
   Eye,
+  EyeOff,
+  FileX2,
   FolderOpen,
-  FoldVertical,
   FolderTree,
   GitBranch,
   List,
   Search,
-  Terminal,
-  UnfoldVertical
+  SquareMinus,
+  SquarePlus,
+  Terminal
 } from 'lucide-react';
-import { FileEntry, RepoSummary } from '../../shared/types';
+import { FileEntry, IgnoreTarget, RepoSummary } from '../../shared/types';
 import {
   getTreeDirKeys,
   TreeOrListRenderer,
@@ -36,6 +38,17 @@ interface FileExplorerSidebarProps {
     targetRepoId: string,
     position: 'before' | 'after'
   ) => void;
+  onIgnorePattern: (
+    repo: RepoSummary,
+    pattern: string,
+    target: IgnoreTarget,
+    untrackPaths?: string[]
+  ) => Promise<void>;
+  onSkipWorktree: (
+    repo: RepoSummary,
+    paths: string[],
+    skip: boolean
+  ) => Promise<void>;
 }
 
 function joinRepoFilePath(repoPath: string, filePath: string): string {
@@ -53,7 +66,9 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
   onCompareWithA,
   onCompareWithB,
   onOpenRepoInNewWindow,
-  onReorderRepo
+  onReorderRepo,
+  onIgnorePattern,
+  onSkipWorktree
 }) => {
   const [selectedRepoId, setSelectedRepoId] = useState<string>('ALL');
   const [filterText, setFilterText] = useState('');
@@ -197,14 +212,14 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
             title="Expand All Repos & Folders"
             onClick={() => void handleExpandAll()}
           >
-            <UnfoldVertical size={14} />
+            <SquarePlus size={14} />
           </button>
           <button
             className="icon-btn"
             title="Collapse All Repos & Folders"
             onClick={handleCollapseAll}
           >
-            <FoldVertical size={14} />
+            <SquareMinus size={14} />
           </button>
         </div>
       </div>
@@ -452,6 +467,41 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
             }}
           >
             <Copy size={14} /> Copy Relative Path
+          </button>
+
+          <div className="context-menu-divider" />
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const { repo, filePath } = fileContextMenu;
+              setFileContextMenu(null);
+              void onIgnorePattern(repo, filePath, 'exclude', [filePath]);
+            }}
+          >
+            <EyeOff size={14} /> Ignore Locally & Untrack (.git/info/exclude)
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const { repo, filePath } = fileContextMenu;
+              setFileContextMenu(null);
+              void onIgnorePattern(repo, filePath, 'gitignore', [filePath]);
+            }}
+          >
+            <FileX2 size={14} /> Add to .gitignore & Untrack
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const { repo, filePath } = fileContextMenu;
+              setFileContextMenu(null);
+              void onSkipWorktree(repo, [filePath], true);
+            }}
+          >
+            <EyeOff size={14} /> Ignore Local Edits (--skip-worktree)
           </button>
 
           <div className="context-menu-divider" />

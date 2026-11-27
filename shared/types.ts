@@ -99,6 +99,20 @@ export interface CommitResultItem {
   error?: string;
 }
 
+export type IgnoreTarget = 'gitignore' | 'exclude';
+
+export interface IgnoreFileResult {
+  alreadyPresent: boolean;
+  pattern: string;
+  targetFile: string;
+}
+
+export interface GitRemoteActionResult {
+  ok: boolean;
+  output: string;
+  error?: string;
+}
+
 export interface RepoRefs {
   branches: string[];
   tags: string[];

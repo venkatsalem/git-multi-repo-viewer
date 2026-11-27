@@ -13,6 +13,9 @@ import {
   FileContentResult,
   FileEntry,
   FileStatusCode,
+  GitRemoteActionResult,
+  IgnoreFileResult,
+  IgnoreTarget,
   RepoRefs,
   RepoSummary,
   WorkspaceScanResult
@@ -783,4 +786,171 @@ export async function commitAcrossRepos(
     }
   }
   return results;
+}
+
+export async function commitStagedAcrossRepos(
+  targets: { repoPath: string; repoName: string }[],
+  message: string
+): Promise<CommitResultItem[]> {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    throw new Error('Commit message cannot be empty.');
+  }
+
+  const results: CommitResultItem[] = [];
+  for (const target of targets) {
+    try {
+      await runGit(target.repoPath, ['commit', '-m', trimmed]);
+      const sha = (
+        await runGit(target.repoPath, ['rev-parse', '--short', 'HEAD'])
+      ).trim();
+      results.push({
+        repoPath: target.repoPath,
+        repoName: target.repoName,
+        ok: true,
+        sha
+      });
+    } catch (err) {
+      results.push({
+        repoPath: target.repoPath,
+        repoName: target.repoName,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+  return results;
+}
+
+export async function stageAllInRepo(repoPath: string): Promise<void> {
+  await runGit(repoPath, ['add', '-A']);
+}
+
+export async function unstageAllInRepo(repoPath: string): Promise<void> {
+  try {
+    await runGit(repoPath, ['reset', 'HEAD']);
+  } catch {
+    await runGit(repoPath, ['rm', '--cached', '-r', '.']);
+  }
+}
+
+export async function ignorePatternInRepo(
+  repoPath: string,
+  rawPattern: string,
+  target: IgnoreTarget,
+  untrackPaths: string[] = []
+): Promise<IgnoreFileResult> {
+  const cleaned = toPosixPath(rawPattern).replace(/^\/+/, '').trim();
+  if (!cleaned) {
+    throw new Error('Ignore pattern cannot be empty.');
+  }
+  const entry = cleaned.startsWith('/') ? cleaned : `/${cleaned}`;
+
+  let targetFilePath: string;
+  if (target === 'gitignore') {
+    targetFilePath = path.join(repoPath, '.gitignore');
+  } else {
+    const resolvedExclude = (
+      await runGit(repoPath, ['rev-parse', '--git-path', 'info/exclude'])
+    ).trim();
+    targetFilePath = path.isAbsolute(resolvedExclude)
+      ? resolvedExclude
+      : path.join(repoPath, resolvedExclude);
+  }
+
+  await fs.mkdir(path.dirname(targetFilePath), { recursive: true });
+
+  let existing = '';
+  try {
+    existing = await fs.readFile(targetFilePath, 'utf8');
+  } catch {
+    existing = '';
+  }
+
+  const existingLines = existing
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'));
+
+  const alreadyPresent =
+    existingLines.includes(entry) || existingLines.includes(cleaned);
+
+  if (!alreadyPresent) {
+    const eol = existing.includes('\r\n') ? '\r\n' : '\n';
+    const needsLeadingNewline =
+      existing.length > 0 && !existing.endsWith('\n') && !existing.endsWith('\r');
+    const addition = `${needsLeadingNewline ? eol : ''}${entry}${eol}`;
+    await fs.appendFile(targetFilePath, addition, 'utf8');
+  }
+
+  if (untrackPaths.length > 0) {
+    await runGit(repoPath, ['rm', '--cached', '-r', '--', ...untrackPaths]).catch(
+      () => undefined
+    );
+  }
+
+  return {
+    alreadyPresent,
+    pattern: entry,
+    targetFile: toPosixPath(path.relative(repoPath, targetFilePath) || targetFilePath)
+  };
+}
+
+export async function setSkipWorktree(
+  repoPath: string,
+  paths: string[],
+  skip: boolean
+): Promise<void> {
+  if (paths.length === 0) return;
+  await runGit(repoPath, [
+    'update-index',
+    skip ? '--skip-worktree' : '--no-skip-worktree',
+    '--',
+    ...paths
+  ]);
+}
+
+export async function getSkipWorktreeFiles(repoPath: string): Promise<string[]> {
+  const raw = await runGit(repoPath, ['ls-files', '-v']);
+  const result: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.length > 2 && line[0] === 'S' && line[1] === ' ') {
+      result.push(toPosixPath(line.slice(2)));
+    }
+  }
+  return result;
+}
+
+export async function runGitRemoteAction(
+  repoPath: string,
+  action: 'fetch' | 'pull' | 'push'
+): Promise<GitRemoteActionResult> {
+  const args =
+    action === 'fetch'
+      ? ['fetch', '--prune']
+      : action === 'pull'
+        ? ['pull', '--no-edit']
+        : ['push'];
+  try {
+    const { stdout, stderr } = await execFileAsync(
+      'git',
+      ['-c', 'core.quotepath=false', ...args],
+      {
+        cwd: repoPath,
+        maxBuffer: GIT_MAX_BUFFER,
+        windowsHide: true
+      }
+    );
+    const combined = `${stdout ?? ''}\n${stderr ?? ''}`.trim();
+    return {
+      ok: true,
+      output: combined || `git ${action} completed.`
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      output: '',
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
 }

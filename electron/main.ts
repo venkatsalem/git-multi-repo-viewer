@@ -28,20 +28,28 @@ function isLocalPortOpen(port: number): Promise<boolean> {
 }
 import {
   commitAcrossRepos,
+  commitStagedAcrossRepos,
   discardFiles,
   getCommitFiles,
   getDiffContent,
   getRepoCommits,
   getRepoRefs,
+  getSkipWorktreeFiles,
+  ignorePatternInRepo,
   listRepoFiles,
   readFileContent,
+  runGitRemoteAction,
   scanWorkspace,
+  setSkipWorktree,
+  stageAllInRepo,
   stageFiles,
+  unstageAllInRepo,
   unstageFiles
 } from './gitService';
 import {
   CommitActionTarget,
   CompareSource,
+  IgnoreTarget,
   RepoSummary
 } from '../shared/types';
 
@@ -319,6 +327,56 @@ app.whenReady().then(() => {
     'git:commitAcrossRepos',
     async (_e, targets: CommitActionTarget[], message: string) => {
       return commitAcrossRepos(targets, message);
+    }
+  );
+
+  ipcMain.handle(
+    'git:commitStagedAcrossRepos',
+    async (
+      _e,
+      targets: { repoPath: string; repoName: string }[],
+      message: string
+    ) => {
+      return commitStagedAcrossRepos(targets, message);
+    }
+  );
+
+  ipcMain.handle('git:stageAll', async (_e, repoPath: string) => {
+    return stageAllInRepo(repoPath);
+  });
+
+  ipcMain.handle('git:unstageAll', async (_e, repoPath: string) => {
+    return unstageAllInRepo(repoPath);
+  });
+
+  ipcMain.handle(
+    'git:ignorePattern',
+    async (
+      _e,
+      repoPath: string,
+      pattern: string,
+      target: IgnoreTarget,
+      untrackPaths?: string[]
+    ) => {
+      return ignorePatternInRepo(repoPath, pattern, target, untrackPaths);
+    }
+  );
+
+  ipcMain.handle(
+    'git:setSkipWorktree',
+    async (_e, repoPath: string, paths: string[], skip: boolean) => {
+      return setSkipWorktree(repoPath, paths, skip);
+    }
+  );
+
+  ipcMain.handle('git:getSkipWorktreeFiles', async (_e, repoPath: string) => {
+    return getSkipWorktreeFiles(repoPath);
+  });
+
+  ipcMain.handle(
+    'git:remoteAction',
+    async (_e, repoPath: string, action: 'fetch' | 'pull' | 'push') => {
+      return runGitRemoteAction(repoPath, action);
     }
   );
 

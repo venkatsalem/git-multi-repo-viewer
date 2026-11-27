@@ -1,11 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  FoldVertical,
   FolderTree,
   GitCommitHorizontal,
   List,
   Search,
-  UnfoldVertical
+  SquareMinus,
+  SquarePlus
 } from 'lucide-react';
 import { CommitFileChange, CommitInfo, RepoSummary } from '../../shared/types';
 import {
@@ -153,7 +153,7 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
             disabled={!selectedCommit || commitFiles.length === 0}
             onClick={handleExpandAll}
           >
-            <UnfoldVertical size={14} />
+            <SquarePlus size={14} />
           </button>
           <button
             className="icon-btn"
@@ -161,7 +161,7 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
             disabled={!selectedCommit || commitFiles.length === 0}
             onClick={handleCollapseAll}
           >
-            <FoldVertical size={14} />
+            <SquareMinus size={14} />
           </button>
         </div>
       </div>

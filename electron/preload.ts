@@ -8,6 +8,9 @@ import {
   DiffContentResult,
   FileContentResult,
   FileEntry,
+  GitRemoteActionResult,
+  IgnoreFileResult,
+  IgnoreTarget,
   RepoRefs,
   RepoSummary,
   WorkspaceScanResult
@@ -39,6 +42,28 @@ export interface GitViewerApi {
     targets: CommitActionTarget[],
     message: string
   ) => Promise<CommitResultItem[]>;
+  commitStagedAcrossRepos: (
+    targets: { repoPath: string; repoName: string }[],
+    message: string
+  ) => Promise<CommitResultItem[]>;
+  stageAll: (repoPath: string) => Promise<void>;
+  unstageAll: (repoPath: string) => Promise<void>;
+  ignorePattern: (
+    repoPath: string,
+    pattern: string,
+    target: IgnoreTarget,
+    untrackPaths?: string[]
+  ) => Promise<IgnoreFileResult>;
+  setSkipWorktree: (
+    repoPath: string,
+    paths: string[],
+    skip: boolean
+  ) => Promise<void>;
+  getSkipWorktreeFiles: (repoPath: string) => Promise<string[]>;
+  remoteAction: (
+    repoPath: string,
+    action: 'fetch' | 'pull' | 'push'
+  ) => Promise<GitRemoteActionResult>;
   onWorkspaceChanged: (callback: () => void) => () => void;
   setThemeSource: (source: 'system' | 'light' | 'dark') => Promise<void>;
   showInExplorer: (targetPath: string, isFile?: boolean) => Promise<void>;
@@ -69,6 +94,18 @@ const api: GitViewerApi = {
     ipcRenderer.invoke('git:discard', repoPath, paths, untrackedPaths),
   commitAcrossRepos: (targets, message) =>
     ipcRenderer.invoke('git:commitAcrossRepos', targets, message),
+  commitStagedAcrossRepos: (targets, message) =>
+    ipcRenderer.invoke('git:commitStagedAcrossRepos', targets, message),
+  stageAll: (repoPath) => ipcRenderer.invoke('git:stageAll', repoPath),
+  unstageAll: (repoPath) => ipcRenderer.invoke('git:unstageAll', repoPath),
+  ignorePattern: (repoPath, pattern, target, untrackPaths) =>
+    ipcRenderer.invoke('git:ignorePattern', repoPath, pattern, target, untrackPaths),
+  setSkipWorktree: (repoPath, paths, skip) =>
+    ipcRenderer.invoke('git:setSkipWorktree', repoPath, paths, skip),
+  getSkipWorktreeFiles: (repoPath) =>
+    ipcRenderer.invoke('git:getSkipWorktreeFiles', repoPath),
+  remoteAction: (repoPath, action) =>
+    ipcRenderer.invoke('git:remoteAction', repoPath, action),
   onWorkspaceChanged: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('workspace:changed', handler);
