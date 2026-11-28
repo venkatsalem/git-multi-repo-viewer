@@ -1,12 +1,15 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   GitBranch,
+  GitCompare,
   Plus,
   Search,
+  Trash2,
   X
 } from 'lucide-react';
-import { BranchListResult, RepoSummary } from '../../shared/types';
+import { BranchEntry, BranchListResult, RepoSummary } from '../../shared/types';
 
 interface RepoBranchModalProps {
   repo: RepoSummary;
@@ -15,12 +18,20 @@ interface RepoBranchModalProps {
     targetBranch: string,
     options?: { createNew?: boolean; isRemote?: boolean }
   ) => Promise<boolean>;
+  onDeleteBranch: (
+    repo: RepoSummary,
+    branchName: string,
+    force: boolean
+  ) => Promise<{ ok: boolean; error?: string }>;
+  onCompareBranch: (repo: RepoSummary, targetBranch: string) => void;
   onClose: () => void;
 }
 
 export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
   repo,
   onCheckout,
+  onDeleteBranch,
+  onCompareBranch,
   onClose
 }) => {
   const [branches, setBranches] = useState<BranchListResult>({
@@ -29,32 +40,37 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
     remote: []
   });
   const [loading, setLoading] = useState(true);
-  const [switching, setSwitching] = useState<string | null>(null);
+  const [busyBranch, setBusyBranch] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [forceDeletePrompt, setForceDeletePrompt] = useState<{
+    branch: string;
+    reason: string;
+  } | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadBranches = useCallback(async () => {
     setLoading(true);
-    void window.gitViewer
-      .getRepoBranches(repo.path)
-      .then((res) => {
-        if (!cancelled) setBranches(res);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    try {
+      const res = await window.gitViewer.getRepoBranches(repo.path);
+      setBranches(res);
+    } finally {
+      setLoading(false);
+    }
   }, [repo.path]);
 
   useEffect(() => {
+    void loadBranches();
+  }, [loadBranches]);
+
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !switching) onClose();
+      if (e.key === 'Escape' && !busyBranch) {
+        if (forceDeletePrompt) setForceDeletePrompt(null);
+        else onClose();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [switching, onClose]);
+  }, [busyBranch, forceDeletePrompt, onClose]);
 
   const q = query.trim();
   const qLower = q.toLowerCase();
@@ -62,7 +78,7 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
   const filteredLocal = useMemo(
     () =>
       qLower
-        ? branches.local.filter((b) => b.toLowerCase().includes(qLower))
+        ? branches.local.filter((b) => b.name.toLowerCase().includes(qLower))
         : branches.local,
     [branches.local, qLower]
   );
@@ -70,34 +86,96 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
   const filteredRemote = useMemo(
     () =>
       qLower
-        ? branches.remote.filter((b) => b.toLowerCase().includes(qLower))
+        ? branches.remote.filter((b) => b.name.toLowerCase().includes(qLower))
         : branches.remote,
     [branches.remote, qLower]
   );
 
   const exactLocalExists = branches.local.some(
-    (b) => b.toLowerCase() === qLower
+    (b) => b.name.toLowerCase() === qLower
   );
 
   const runSwitch = async (
     target: string,
     options?: { createNew?: boolean; isRemote?: boolean }
   ) => {
-    if (switching) return;
-    setSwitching(target);
+    if (busyBranch) return;
+    setBusyBranch(target);
     try {
       const ok = await onCheckout(repo, target, options);
       if (ok) onClose();
     } finally {
-      setSwitching(null);
+      setBusyBranch(null);
     }
+  };
+
+  const runDelete = async (branchName: string, force = false) => {
+    if (busyBranch) return;
+    setBusyBranch(branchName);
+    try {
+      const res = await onDeleteBranch(repo, branchName, force);
+      if (res.ok) {
+        setForceDeletePrompt(null);
+        await loadBranches();
+      } else if (!force) {
+        setForceDeletePrompt({
+          branch: branchName,
+          reason:
+            res.error ||
+            `Branch "${branchName}" may contain unmerged commits.`
+        });
+      }
+    } finally {
+      setBusyBranch(null);
+    }
+  };
+
+  const renderSyncPill = (b: BranchEntry) => {
+    if (b.syncStatus === 'local-only') {
+      return (
+        <span
+          className="branch-sync-pill local-only"
+          title="No upstream remote tracking branch — local only"
+        >
+          local-only
+        </span>
+      );
+    }
+    if (b.syncStatus === 'gone') {
+      return (
+        <span
+          className="branch-sync-pill gone"
+          title={`Remote tracking branch (${b.upstream}) was deleted`}
+        >
+          remote gone
+        </span>
+      );
+    }
+    if (b.syncStatus === 'ahead-behind') {
+      return (
+        <span
+          className="branch-sync-pill ahead-behind"
+          title={`Tracking ${b.upstream}: ${b.trackLabel}`}
+        >
+          {b.trackLabel}
+        </span>
+      );
+    }
+    return (
+      <span
+        className="branch-sync-pill synced"
+        title={`In sync with ${b.upstream}`}
+      >
+        synced
+      </span>
+    );
   };
 
   return (
     <div
       className="modal-backdrop"
       onClick={() => {
-        if (!switching) onClose();
+        if (!busyBranch) onClose();
       }}
     >
       <div
@@ -107,11 +185,11 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
         <div className="settings-modal-header">
           <div className="modal-title">
             <GitBranch size={17} style={{ color: 'var(--accent)' }} />
-            <span>Switch Branch — {repo.name}</span>
+            <span>Switch / Manage Branches — {repo.name}</span>
           </div>
           <button
             className="icon-btn"
-            disabled={Boolean(switching)}
+            disabled={Boolean(busyBranch)}
             onClick={onClose}
             title="Close (Esc)"
           >
@@ -125,13 +203,13 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
             <input
               autoFocus
               value={query}
-              disabled={Boolean(switching)}
+              disabled={Boolean(busyBranch)}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Filter branches or type a new branch name..."
+              placeholder="Filter branches (sorted most-recent first) or type new name..."
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && q && !exactLocalExists) {
                   if (filteredLocal.length === 1) {
-                    void runSwitch(filteredLocal[0]);
+                    void runSwitch(filteredLocal[0].name);
                   } else {
                     void runSwitch(q, { createNew: true });
                   }
@@ -145,14 +223,54 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
               type="button"
               className="btn btn-primary"
               style={{ justifyContent: 'flex-start' }}
-              disabled={Boolean(switching)}
+              disabled={Boolean(busyBranch)}
               onClick={() => void runSwitch(q, { createNew: true })}
             >
               <Plus size={13} />
-              {switching === q
+              {busyBranch === q
                 ? `Creating ${q}...`
                 : `Create & Checkout "${q}"`}
             </button>
+          )}
+
+          {forceDeletePrompt && (
+            <div className="branch-force-banner">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <AlertTriangle size={14} style={{ color: 'var(--status-d)' }} />
+                <strong>
+                  Cannot safely delete &ldquo;{forceDeletePrompt.branch}&rdquo;
+                </strong>
+              </div>
+              <div
+                style={{
+                  fontSize: '0.846rem',
+                  color: 'var(--text-secondary)',
+                  wordBreak: 'break-word'
+                }}
+              >
+                {forceDeletePrompt.reason}
+              </div>
+              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={Boolean(busyBranch)}
+                  onClick={() => setForceDeletePrompt(null)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-danger"
+                  disabled={Boolean(busyBranch)}
+                  onClick={() =>
+                    void runDelete(forceDeletePrompt.branch, true)
+                  }
+                >
+                  Force Delete (-D)
+                </button>
+              </div>
+            </div>
           )}
 
           <div className="branch-list-scroll">
@@ -169,35 +287,79 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
                 {filteredLocal.length > 0 && (
                   <>
                     <div className="workspace-dropdown-label">
-                      Local Branches ({filteredLocal.length})
+                      Local Branches ({filteredLocal.length} · newest first)
                     </div>
                     {filteredLocal.map((b) => {
-                      const isCurrent = b === branches.current;
+                      const isCurrent = b.name === branches.current;
                       return (
-                        <button
-                          key={`local:${b}`}
-                          type="button"
-                          disabled={Boolean(switching)}
+                        <div
+                          key={`local:${b.name}`}
                           className={`branch-item-row ${isCurrent ? 'active' : ''}`}
                           onClick={() => {
-                            if (!isCurrent) void runSwitch(b);
+                            if (!isCurrent && !busyBranch) void runSwitch(b.name);
                           }}
+                          title={
+                            b.upstream
+                              ? `Tracks ${b.upstream} (${b.relativeDate})`
+                              : `Local-only branch (${b.relativeDate})`
+                          }
                         >
                           <span className="workspace-recent-check">
                             {isCurrent && <Check size={12} />}
                           </span>
                           <GitBranch
                             size={13}
-                            style={{ color: 'var(--text-secondary)', flexShrink: 0 }}
+                            style={{
+                              color: isCurrent
+                                ? 'var(--accent)'
+                                : 'var(--text-secondary)',
+                              flexShrink: 0
+                            }}
                           />
-                          <span className="workspace-recent-path">{b}</span>
-                          {isCurrent && (
+                          <span className="workspace-recent-path">{b.name}</span>
+                          {renderSyncPill(b)}
+                          {b.relativeDate && (
+                            <span className="branch-date-label">
+                              {b.relativeDate}
+                            </span>
+                          )}
+                          {isCurrent ? (
                             <span className="count-pill">current</span>
+                          ) : (
+                            <div
+                              className="branch-row-actions"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                style={{ width: 22, height: 22 }}
+                                disabled={Boolean(busyBranch)}
+                                title={`Compare "${b.name}" with current branch`}
+                                onClick={() => {
+                                  onClose();
+                                  onCompareBranch(repo, b.name);
+                                }}
+                              >
+                                <GitCompare size={12} />
+                              </button>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                style={{
+                                  width: 22,
+                                  height: 22,
+                                  color: 'var(--status-d)'
+                                }}
+                                disabled={Boolean(busyBranch)}
+                                title={`Delete local branch "${b.name}" (git branch -d)`}
+                                onClick={() => void runDelete(b.name, false)}
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            </div>
                           )}
-                          {switching === b && (
-                            <span className="count-pill">switching...</span>
-                          )}
-                        </button>
+                        </div>
                       );
                     })}
                   </>
@@ -209,28 +371,49 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
                       className="workspace-dropdown-label"
                       style={{ marginTop: 6 }}
                     >
-                      Remote Branches ({filteredRemote.length})
+                      Remote Branches ({filteredRemote.length} · newest first)
                     </div>
                     {filteredRemote.map((b) => (
-                      <button
-                        key={`remote:${b}`}
-                        type="button"
-                        disabled={Boolean(switching)}
+                      <div
+                        key={`remote:${b.name}`}
                         className="branch-item-row"
-                        onClick={() =>
-                          void runSwitch(b, { isRemote: true })
-                        }
+                        onClick={() => {
+                          if (!busyBranch) {
+                            void runSwitch(b.name, { isRemote: true });
+                          }
+                        }}
+                        title={`Remote branch ${b.name} (${b.relativeDate}) — click to checkout & track`}
                       >
                         <span className="workspace-recent-check" />
                         <GitBranch
                           size={13}
                           style={{ color: 'var(--text-muted)', flexShrink: 0 }}
                         />
-                        <span className="workspace-recent-path">{b}</span>
-                        {switching === b && (
-                          <span className="count-pill">switching...</span>
+                        <span className="workspace-recent-path">{b.name}</span>
+                        {b.relativeDate && (
+                          <span className="branch-date-label">
+                            {b.relativeDate}
+                          </span>
                         )}
-                      </button>
+                        <div
+                          className="branch-row-actions"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            style={{ width: 22, height: 22 }}
+                            disabled={Boolean(busyBranch)}
+                            title={`Compare "${b.name}" with current branch`}
+                            onClick={() => {
+                              onClose();
+                              onCompareBranch(repo, b.name);
+                            }}
+                          >
+                            <GitCompare size={12} />
+                          </button>
+                        </div>
+                      </div>
                     ))}
                   </>
                 )}
@@ -250,7 +433,7 @@ export const RepoBranchModal: React.FC<RepoBranchModalProps> = ({
           </span>
           <button
             className="btn"
-            disabled={Boolean(switching)}
+            disabled={Boolean(busyBranch)}
             onClick={onClose}
           >
             Close

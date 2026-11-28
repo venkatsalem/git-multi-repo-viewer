@@ -55,6 +55,8 @@ export interface CommitFileChange {
   status: FileStatusCode;
   additions: number | null;
   deletions: number | null;
+  /** True when the file matches the current/base branch content despite having edits on target. */
+  matchesBase?: boolean;
 }
 
 export interface FileEntry {
@@ -96,6 +98,7 @@ export interface CommitResultItem {
   repoName: string;
   ok: boolean;
   sha?: string;
+  branch?: string;
   error?: string;
 }
 
@@ -135,10 +138,31 @@ export interface RepoBatchResultItem {
   error?: string;
 }
 
+export type BranchSyncStatus =
+  | 'local-only'
+  | 'synced'
+  | 'ahead-behind'
+  | 'gone';
+
+export interface BranchEntry {
+  name: string;
+  relativeDate: string;
+  upstream?: string;
+  syncStatus: BranchSyncStatus;
+  trackLabel?: string;
+}
+
 export interface BranchListResult {
   current: string;
-  local: string[];
-  remote: string[];
+  local: BranchEntry[];
+  remote: BranchEntry[];
+}
+
+export interface BranchCompareResult {
+  currentBranch: string;
+  targetBranch: string;
+  commitsOnTarget: CommitInfo[];
+  changedFiles: CommitFileChange[];
 }
 
 export interface RepoRefs {

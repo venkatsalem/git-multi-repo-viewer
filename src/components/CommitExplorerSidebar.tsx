@@ -1,13 +1,22 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  CheckSquare,
+  Download,
   FolderTree,
+  GitBranch,
   GitCommitHorizontal,
   List,
   Search,
+  Square,
   SquareMinus,
   SquarePlus
 } from 'lucide-react';
-import { CommitFileChange, CommitInfo, RepoSummary } from '../../shared/types';
+import {
+  BranchListResult,
+  CommitFileChange,
+  CommitInfo,
+  RepoSummary
+} from '../../shared/types';
 import {
   getTreeDirKeys,
   TreeOrListRenderer,
@@ -25,6 +34,16 @@ interface CommitExplorerSidebarProps {
   onSelectCommit: (commit: CommitInfo) => void;
   selectedCommitFile: string | null;
   onSelectCommitFile: (commit: CommitInfo, file: CommitFileChange) => void;
+  onCherryPickCommits: (
+    repoPath: string,
+    shas: string[],
+    noCommit: boolean
+  ) => Promise<void>;
+  onGetFileFromRef: (
+    repoPath: string,
+    ref: string,
+    filePath: string
+  ) => Promise<void>;
   onCompareWithA: (repoPath: string, filePath: string, ref: string) => void;
   onCompareWithB: (repoPath: string, filePath: string, ref: string) => void;
 }
@@ -50,15 +69,76 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
   onSelectCommit,
   selectedCommitFile,
   onSelectCommitFile,
+  onCherryPickCommits,
+  onGetFileFromRef,
   onCompareWithA,
   onCompareWithB
 }) => {
   const [selectedRepoId, setSelectedRepoId] = useState<string>('ALL');
+  const [selectedBranchRef, setSelectedBranchRef] = useState<string>('');
+  const [repoBranches, setRepoBranches] = useState<BranchListResult | null>(
+    null
+  );
+  const [branchCommits, setBranchCommits] = useState<CommitInfo[]>([]);
+  const [loadingBranchCommits, setLoadingBranchCommits] = useState(false);
+  const [checkedCommitKeys, setCheckedCommitKeys] = useState<Set<string>>(
+    new Set()
+  );
+  const [isCherryPicking, setIsCherryPicking] = useState(false);
   const [filterMode, setFilterMode] = useState<CommitFilterMode>('all');
   const [searchText, setSearchText] = useState('');
   const [commitFiles, setCommitFiles] = useState<CommitFileChange[]>([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+
+  const selectedRepo = useMemo(
+    () => repos.find((r) => r.id === selectedRepoId) ?? null,
+    [repos, selectedRepoId]
+  );
+
+  useEffect(() => {
+    setSelectedBranchRef('');
+    setCheckedCommitKeys(new Set());
+    if (!selectedRepo) {
+      setRepoBranches(null);
+      return;
+    }
+    let cancelled = false;
+    void window.gitViewer.getRepoBranches(selectedRepo.path).then((res) => {
+      if (!cancelled) setRepoBranches(res);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRepo?.path]);
+
+  useEffect(() => {
+    if (!selectedRepo || !selectedBranchRef) {
+      setBranchCommits([]);
+      return;
+    }
+    let cancelled = false;
+    setLoadingBranchCommits(true);
+    void window.gitViewer
+      .getRepoCommits(
+        {
+          id: selectedRepo.id,
+          name: selectedRepo.name,
+          path: selectedRepo.path
+        },
+        100,
+        selectedBranchRef
+      )
+      .then((res) => {
+        if (!cancelled) setBranchCommits(res);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingBranchCommits(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRepo, selectedBranchRef]);
 
   useEffect(() => {
     if (!selectedCommit) {
@@ -82,9 +162,14 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
     };
   }, [selectedCommit]);
 
+  const sourceCommits = useMemo(() => {
+    if (selectedRepo && selectedBranchRef) return branchCommits;
+    return commits;
+  }, [selectedRepo, selectedBranchRef, branchCommits, commits]);
+
   const filteredCommits = useMemo(() => {
     const q = searchText.trim().toLowerCase();
-    return commits.filter((c) => {
+    return sourceCommits.filter((c) => {
       if (selectedRepoId !== 'ALL' && c.repoId !== selectedRepoId) return false;
       if (filterMode === 'unpushed' && !c.unpushed) return false;
       if (
@@ -104,7 +189,56 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
       }
       return true;
     });
-  }, [commits, selectedRepoId, filterMode, baselineTimestamp, searchText]);
+  }, [
+    sourceCommits,
+    selectedRepoId,
+    filterMode,
+    baselineTimestamp,
+    searchText
+  ]);
+
+  const checkedCommitsByRepo = useMemo(() => {
+    const map = new Map<string, CommitInfo[]>();
+    for (const c of sourceCommits) {
+      const k = `${c.repoId}::${c.sha}`;
+      if (!checkedCommitKeys.has(k)) continue;
+      const list = map.get(c.repoPath) ?? [];
+      list.push(c);
+      map.set(c.repoPath, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => a.timestamp - b.timestamp);
+    }
+    return map;
+  }, [sourceCommits, checkedCommitKeys]);
+
+  const checkedCommitCount = checkedCommitKeys.size;
+
+  const toggleCommitCheck = (key: string) => {
+    setCheckedCommitKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const handleRunCherryPick = async (noCommit: boolean) => {
+    if (checkedCommitsByRepo.size === 0 || isCherryPicking) return;
+    setIsCherryPicking(true);
+    try {
+      for (const [repoPath, list] of checkedCommitsByRepo.entries()) {
+        await onCherryPickCommits(
+          repoPath,
+          list.map((c) => c.sha),
+          noCommit
+        );
+      }
+      setCheckedCommitKeys(new Set());
+    } finally {
+      setIsCherryPicking(false);
+    }
+  };
 
   const toggleDir = (dirKey: string) => {
     setExpandedDirs((prev) => {
@@ -188,6 +322,50 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
           ))}
         </select>
 
+        {selectedRepo && repoBranches && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <GitBranch
+              size={13}
+              style={{ color: 'var(--text-secondary)', flexShrink: 0 }}
+            />
+            <select
+              className="compare-select"
+              style={{ flex: 1, maxWidth: '100%' }}
+              value={selectedBranchRef}
+              onChange={(e) => {
+                setSelectedBranchRef(e.target.value);
+                setCheckedCommitKeys(new Set());
+              }}
+              title="Browse commits on another branch without checking it out"
+            >
+              <option value="">
+                Current Branch ({selectedRepo.branch})
+              </option>
+              <option value="--all">All Branches (--all)</option>
+              {repoBranches.local.length > 0 && (
+                <optgroup label="Local Branches (recent first)">
+                  {repoBranches.local.map((b) => (
+                    <option key={`l:${b.name}`} value={b.name}>
+                      {b.name}
+                      {b.relativeDate ? ` (${b.relativeDate})` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {repoBranches.remote.length > 0 && (
+                <optgroup label="Remote Branches (recent first)">
+                  {repoBranches.remote.map((b) => (
+                    <option key={`r:${b.name}`} value={b.name}>
+                      {b.name}
+                      {b.relativeDate ? ` (${b.relativeDate})` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          </div>
+        )}
+
         <div className="segmented" style={{ width: '100%' }}>
           <button
             style={{ flex: 1, justifyContent: 'center' }}
@@ -228,30 +406,94 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
         />
       </div>
 
+      {checkedCommitCount > 0 && (
+        <div className="cherry-pick-bar">
+          <span style={{ fontSize: '0.846rem', color: 'var(--text-secondary)' }}>
+            {checkedCommitCount} selected
+          </span>
+          <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
+            <button
+              className="mini-btn"
+              disabled={isCherryPicking}
+              onClick={() => setCheckedCommitKeys(new Set())}
+            >
+              Clear
+            </button>
+            <button
+              className="mini-btn"
+              disabled={isCherryPicking}
+              title="Apply selected commit changes to working tree WITHOUT committing (git cherry-pick -n)"
+              onClick={() => void handleRunCherryPick(true)}
+            >
+              Apply (-n)
+            </button>
+            <button
+              className="btn btn-primary"
+              style={{ padding: '2px 8px', fontSize: '0.846rem' }}
+              disabled={isCherryPicking}
+              title="Cherry-pick selected commits onto each repo's current branch"
+              onClick={() => void handleRunCherryPick(false)}
+            >
+              {isCherryPicking
+                ? 'Picking...'
+                : `Cherry-Pick (${checkedCommitCount})`}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="split-vertical">
         <div className="split-top">
-          {loadingCommits && filteredCommits.length === 0 ? (
+          {(loadingCommits || loadingBranchCommits) &&
+          filteredCommits.length === 0 ? (
             <div className="empty-state">Loading commits...</div>
           ) : filteredCommits.length === 0 ? (
             <div className="empty-state">No matching commits found.</div>
           ) : (
             filteredCommits.map((c) => {
+              const rowKey = `${c.repoId}::${c.sha}`;
               const isSelected =
                 selectedCommit?.sha === c.sha &&
                 selectedCommit?.repoId === c.repoId;
+              const isChecked = checkedCommitKeys.has(rowKey);
               const isNewSinceBaseline =
                 baselineTimestamp !== null &&
                 c.timestamp * 1000 >= baselineTimestamp;
               return (
                 <div
-                  key={`${c.repoId}::${c.sha}`}
+                  key={rowKey}
                   className={`commit-item ${isSelected ? 'selected' : ''}`}
                   onClick={() => onSelectCommit(c)}
                 >
-                  <div className="commit-subject" title={c.subject}>
-                    {c.subject}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span
+                      className="checkbox-cell"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleCommitCheck(rowKey);
+                      }}
+                      style={{
+                        color: isChecked
+                          ? 'var(--accent)'
+                          : 'var(--text-muted)'
+                      }}
+                      title="Select commit to cherry-pick onto current working branch"
+                    >
+                      {isChecked ? (
+                        <CheckSquare size={14} />
+                      ) : (
+                        <Square size={14} />
+                      )}
+                    </span>
+                    <div
+                      className="commit-subject"
+                      style={{ marginBottom: 0, flex: 1 }}
+                      title={c.subject}
+                    >
+                      {c.subject}
+                    </div>
                   </div>
-                  <div className="commit-meta">
+                  <div className="commit-meta" style={{ paddingLeft: 20, marginTop: 3 }}>
                     <span className="tag-pill repo">{c.repoName}</span>
                     <span className="sha-pill">{c.shortSha}</span>
                     <span>{c.author}</span>
@@ -324,6 +566,19 @@ export const CommitExplorerSidebar: React.FC<CommitExplorerSidebarProps> = ({
                 )}
                 renderActions={(f) => (
                   <>
+                    <button
+                      className="mini-btn"
+                      title="Bring this file's commit version into current working tree (git checkout <sha> -- file)"
+                      onClick={() =>
+                        void onGetFileFromRef(
+                          selectedCommit.repoPath,
+                          selectedCommit.sha,
+                          f.path
+                        )
+                      }
+                    >
+                      <Download size={10} /> Get
+                    </button>
                     <button
                       className="mini-btn"
                       title="Set this commit version as Compare A"

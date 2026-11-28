@@ -1525,6 +1525,127 @@ textarea {
   overflow: hidden;
 }
 
+.commit-target-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-root);
+  border: 1px solid var(--border);
+}
+
+.commit-target-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.commit-target-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.923rem;
+}
+
+.commit-new-branch-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.commit-new-branch-input-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  border-radius: 5px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+}
+
+.commit-new-branch-input-row:focus-within {
+  border-color: var(--accent);
+}
+
+.commit-new-branch-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-editor, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.923rem;
+}
+
+.commit-branch-hint {
+  font-size: 0.846rem;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
+.commit-branch-hint.error {
+  color: var(--status-d);
+}
+
+.cmp-badge {
+  font-size: 0.769rem;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 999px;
+  line-height: 1.45;
+  flex-shrink: 0;
+}
+
+.cmp-badge.cmp-diff {
+  color: var(--status-m);
+  background: rgba(210, 153, 34, 0.14);
+  border: 1px solid rgba(210, 153, 34, 0.35);
+}
+
+.cmp-badge.cmp-same {
+  color: var(--status-a);
+  background: rgba(63, 185, 80, 0.12);
+  border: 1px solid rgba(63, 185, 80, 0.32);
+}
+
+.commit-target-label {
+  color: var(--text-secondary);
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.commit-branch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(56, 139, 253, 0.14);
+  border: 1px solid rgba(56, 139, 253, 0.45);
+  color: var(--text-primary);
+  font-family: var(--font-editor, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 0.885rem;
+  font-weight: 600;
+  max-width: 100%;
+  word-break: break-all;
+}
+
+.commit-branch-pill.detached {
+  background: rgba(210, 153, 34, 0.14);
+  border-color: rgba(210, 153, 34, 0.5);
+  color: var(--status-m);
+}
+
+.commit-repo-sub {
+  color: var(--text-secondary);
+  font-size: 0.885rem;
+}
+
 .commit-modal-textarea {
   width: 100%;
   min-height: 110px;
@@ -1598,4 +1719,76 @@ textarea {
   border-color: var(--accent);
   color: var(--text-primary);
   background: var(--bg-selected);
+}
+
+.branch-modal {
+  max-width: 620px;
+}
+
+.branch-sync-pill {
+  font-size: 0.731rem;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.branch-sync-pill.local-only {
+  background: rgba(76, 141, 255, 0.14);
+  color: var(--accent);
+  border: 1px solid rgba(76, 141, 255, 0.35);
+}
+
+.branch-sync-pill.synced {
+  background: rgba(89, 179, 114, 0.14);
+  color: var(--status-a);
+  border: 1px solid rgba(89, 179, 114, 0.35);
+}
+
+.branch-sync-pill.ahead-behind {
+  background: rgba(209, 154, 102, 0.15);
+  color: var(--status-m);
+  border: 1px solid rgba(209, 154, 102, 0.4);
+}
+
+.branch-sync-pill.gone {
+  background: rgba(224, 108, 117, 0.16);
+  color: var(--status-d);
+  border: 1px solid rgba(224, 108, 117, 0.4);
+}
+
+.branch-date-label {
+  font-size: 0.769rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.branch-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.branch-force-banner {
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgba(224, 108, 117, 0.1);
+  border: 1px solid rgba(224, 108, 117, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cherry-pick-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }

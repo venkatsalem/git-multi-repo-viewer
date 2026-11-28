@@ -29,8 +29,13 @@ function isLocalPortOpen(port: number): Promise<boolean> {
 import {
   checkoutBranchAcrossRepos,
   checkoutBranchInRepo,
+  checkoutFileFromRef,
+  checkoutFilesFromRef,
+  cherryPickCommits,
   commitAcrossRepos,
   commitStagedAcrossRepos,
+  compareBranchWithCurrent,
+  deleteLocalBranch,
   discardFiles,
   fetchAllRepos,
   getCommitFiles,
@@ -273,8 +278,13 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     'repo:getCommits',
-    async (_e, repo: Pick<RepoSummary, 'id' | 'name' | 'path'>, limit?: number) => {
-      return getRepoCommits(repo, limit);
+    async (
+      _e,
+      repo: Pick<RepoSummary, 'id' | 'name' | 'path'>,
+      limit?: number,
+      branchRef?: string
+    ) => {
+      return getRepoCommits(repo, limit, branchRef);
     }
   );
 
@@ -335,8 +345,13 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     'git:commitAcrossRepos',
-    async (_e, targets: CommitActionTarget[], message: string) => {
-      return commitAcrossRepos(targets, message);
+    async (
+      _e,
+      targets: CommitActionTarget[],
+      message: string,
+      newBranchName?: string
+    ) => {
+      return commitAcrossRepos(targets, message, newBranchName);
     }
   );
 
@@ -345,9 +360,10 @@ app.whenReady().then(() => {
     async (
       _e,
       targets: { repoPath: string; repoName: string }[],
-      message: string
+      message: string,
+      newBranchName?: string
     ) => {
-      return commitStagedAcrossRepos(targets, message);
+      return commitStagedAcrossRepos(targets, message, newBranchName);
     }
   );
 
@@ -433,6 +449,47 @@ app.whenReady().then(() => {
       createIfMissing: boolean
     ) => {
       return checkoutBranchAcrossRepos(repos, targetBranch, createIfMissing);
+    }
+  );
+
+  ipcMain.handle(
+    'git:deleteLocalBranch',
+    async (_e, repoPath: string, branchName: string, force?: boolean) => {
+      return deleteLocalBranch(repoPath, branchName, force);
+    }
+  );
+
+  ipcMain.handle(
+    'git:cherryPickCommits',
+    async (_e, repoPath: string, shas: string[], noCommit?: boolean) => {
+      return cherryPickCommits(repoPath, shas, noCommit);
+    }
+  );
+
+  ipcMain.handle(
+    'git:checkoutFileFromRef',
+    async (_e, repoPath: string, ref: string, filePath: string) => {
+      return checkoutFileFromRef(repoPath, ref, filePath);
+    }
+  );
+
+  ipcMain.handle(
+    'git:checkoutFilesFromRef',
+    async (_e, repoPath: string, ref: string, filePaths: string[]) => {
+      return checkoutFilesFromRef(repoPath, ref, filePaths);
+    }
+  );
+
+  ipcMain.handle(
+    'git:compareBranchWithCurrent',
+    async (
+      _e,
+      repo: Pick<RepoSummary, 'id' | 'name' | 'path' | 'branch'>,
+      targetBranch: string,
+      mode?: 'direct' | 'target-only',
+      baseBranch?: string
+    ) => {
+      return compareBranchWithCurrent(repo, targetBranch, mode, baseBranch);
     }
   );
 

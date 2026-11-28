@@ -3,6 +3,8 @@ import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 import {
+  BranchCompareResult,
+  BranchEntry,
   BranchListResult,
   ChangedFile,
   CommitActionTarget,
@@ -324,7 +326,8 @@ export async function scanWorkspace(
 
 export async function getRepoCommits(
   repo: Pick<RepoSummary, 'id' | 'name' | 'path'>,
-  limit = 60
+  limit = 60,
+  branchRef?: string
 ): Promise<CommitInfo[]> {
   const RECORD_SEP = '\x1e';
   const FIELD_SEP = '\x1f';
@@ -343,13 +346,14 @@ export async function getRepoCommits(
 
   let logOut = '';
   try {
-    logOut = await runGit(repo.path, [
-      'log',
-      `-n`,
-      String(limit),
-      '--date-order',
-      `--format=${format}`
-    ]);
+    const args = ['log', `-n`, String(limit), '--date-order', `--format=${format}`];
+    const ref = branchRef?.trim();
+    if (ref === '--all') {
+      args.push('--all');
+    } else if (ref) {
+      args.push(ref);
+    }
+    logOut = await runGit(repo.path, args);
   } catch {
     return [];
   }
@@ -532,6 +536,7 @@ export async function getRepoRefs(repoPath: string): Promise<RepoRefs> {
     const [branchesRaw, tagsRaw] = await Promise.all([
       runGit(repoPath, [
         'for-each-ref',
+        '--sort=-committerdate',
         '--format=%(refname:short)',
         'refs/heads',
         'refs/remotes'
@@ -542,7 +547,7 @@ export async function getRepoRefs(repoPath: string): Promise<RepoRefs> {
       branches: branchesRaw
         .split(/\r?\n/)
         .map((s) => s.trim())
-        .filter(Boolean),
+        .filter((s) => Boolean(s) && !s.endsWith('/HEAD')),
       tags: tagsRaw
         .split(/\r?\n/)
         .map((s) => s.trim())
@@ -752,19 +757,45 @@ export async function discardFiles(
   }
 }
 
+async function validateNewBranchName(
+  repoPath: string,
+  newBranchName?: string
+): Promise<string | undefined> {
+  const clean = newBranchName?.trim();
+  if (!clean) return undefined;
+  try {
+    await runGit(repoPath, ['check-ref-format', '--branch', clean]);
+  } catch {
+    throw new Error(`Invalid branch name: "${clean}"`);
+  }
+  return clean;
+}
+
 export async function commitAcrossRepos(
   targets: CommitActionTarget[],
-  message: string
+  message: string,
+  newBranchName?: string
 ): Promise<CommitResultItem[]> {
   const trimmed = message.trim();
   if (!trimmed) {
     throw new Error('Commit message cannot be empty.');
   }
+  const activeTargets = targets.filter((t) => t.paths.length > 0);
+  if (activeTargets.length === 0) return [];
+
+  const cleanNewBranch = await validateNewBranchName(
+    activeTargets[0].repoPath,
+    newBranchName
+  );
 
   const results: CommitResultItem[] = [];
-  for (const target of targets) {
-    if (target.paths.length === 0) continue;
+  for (const target of activeTargets) {
     try {
+      if (cleanNewBranch) {
+        await checkoutBranchInRepo(target.repoPath, cleanNewBranch, {
+          createNew: true
+        });
+      }
       await runGit(target.repoPath, ['add', '-A', '--', ...target.paths]);
       await runGit(target.repoPath, [
         'commit',
@@ -774,11 +805,15 @@ export async function commitAcrossRepos(
         ...target.paths
       ]);
       const sha = (await runGit(target.repoPath, ['rev-parse', '--short', 'HEAD'])).trim();
+      const branch = (
+        await runGit(target.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
+      ).trim();
       results.push({
         repoPath: target.repoPath,
         repoName: target.repoName,
         ok: true,
-        sha
+        sha,
+        branch
       });
     } catch (err) {
       results.push({
@@ -794,25 +829,41 @@ export async function commitAcrossRepos(
 
 export async function commitStagedAcrossRepos(
   targets: { repoPath: string; repoName: string }[],
-  message: string
+  message: string,
+  newBranchName?: string
 ): Promise<CommitResultItem[]> {
   const trimmed = message.trim();
   if (!trimmed) {
     throw new Error('Commit message cannot be empty.');
   }
+  if (targets.length === 0) return [];
+
+  const cleanNewBranch = await validateNewBranchName(
+    targets[0].repoPath,
+    newBranchName
+  );
 
   const results: CommitResultItem[] = [];
   for (const target of targets) {
     try {
+      if (cleanNewBranch) {
+        await checkoutBranchInRepo(target.repoPath, cleanNewBranch, {
+          createNew: true
+        });
+      }
       await runGit(target.repoPath, ['commit', '-m', trimmed]);
       const sha = (
         await runGit(target.repoPath, ['rev-parse', '--short', 'HEAD'])
+      ).trim();
+      const branch = (
+        await runGit(target.repoPath, ['rev-parse', '--abbrev-ref', 'HEAD'])
       ).trim();
       results.push({
         repoPath: target.repoPath,
         repoName: target.repoName,
         ok: true,
-        sha
+        sha,
+        branch
       });
     } catch (err) {
       results.push({
@@ -1117,32 +1168,79 @@ export async function updateProjectRepos(
   });
 }
 
+function formatTrackLabel(trackRaw: string): string {
+  const parts: string[] = [];
+  const aheadMatch = trackRaw.match(/ahead\s+(\d+)/i);
+  const behindMatch = trackRaw.match(/behind\s+(\d+)/i);
+  if (aheadMatch) parts.push(`↑${aheadMatch[1]}`);
+  if (behindMatch) parts.push(`↓${behindMatch[1]}`);
+  return parts.join(' ') || trackRaw;
+}
+
 export async function getRepoBranches(repoPath: string): Promise<BranchListResult> {
+  const SEP = '\x1f';
   const [currentRaw, localRaw, remoteRaw] = await Promise.all([
     runGit(repoPath, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => ''),
     runGit(repoPath, [
       'for-each-ref',
-      '--format=%(refname:short)',
+      `--format=%(refname:short)${SEP}%(committerdate:relative)${SEP}%(upstream:short)${SEP}%(upstream:track,nobracket)`,
       '--sort=-committerdate',
       'refs/heads'
     ]).catch(() => ''),
     runGit(repoPath, [
       'for-each-ref',
-      '--format=%(refname:short)',
+      `--format=%(refname:short)${SEP}%(committerdate:relative)`,
       '--sort=-committerdate',
       'refs/remotes'
     ]).catch(() => '')
   ]);
 
-  const local = localRaw
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const local: BranchEntry[] = [];
+  for (const line of localRaw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [name = '', relativeDate = '', upstream = '', trackRaw = ''] =
+      line.split(SEP);
+    const trimmedName = name.trim();
+    if (!trimmedName) continue;
+    const cleanUpstream = upstream.trim() || undefined;
+    const cleanTrack = trackRaw.trim();
 
-  const remote = remoteRaw
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter((s) => Boolean(s) && !s.endsWith('/HEAD'));
+    let syncStatus: BranchEntry['syncStatus'] = 'local-only';
+    let trackLabel: string | undefined;
+
+    if (cleanUpstream) {
+      if (cleanTrack.toLowerCase() === 'gone') {
+        syncStatus = 'gone';
+        trackLabel = 'remote gone';
+      } else if (cleanTrack) {
+        syncStatus = 'ahead-behind';
+        trackLabel = formatTrackLabel(cleanTrack);
+      } else {
+        syncStatus = 'synced';
+      }
+    }
+
+    local.push({
+      name: trimmedName,
+      relativeDate: relativeDate.trim(),
+      upstream: cleanUpstream,
+      syncStatus,
+      trackLabel
+    });
+  }
+
+  const remote: BranchEntry[] = [];
+  for (const line of remoteRaw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const [name = '', relativeDate = ''] = line.split(SEP);
+    const trimmedName = name.trim();
+    if (!trimmedName || trimmedName.endsWith('/HEAD')) continue;
+    remote.push({
+      name: trimmedName,
+      relativeDate: relativeDate.trim(),
+      syncStatus: 'synced'
+    });
+  }
 
   return {
     current: currentRaw.trim(),
@@ -1337,4 +1435,206 @@ export async function checkoutBranchAcrossRepos(
       };
     }
   });
+}
+
+export async function deleteLocalBranch(
+  repoPath: string,
+  branchName: string,
+  force = false
+): Promise<void> {
+  const clean = branchName.trim();
+  if (!clean) throw new Error('Branch name cannot be empty.');
+  await runGit(repoPath, ['branch', force ? '-D' : '-d', clean]);
+}
+
+export async function cherryPickCommits(
+  repoPath: string,
+  shas: string[],
+  noCommit = false
+): Promise<{ ok: boolean; summary: string; error?: string }> {
+  if (shas.length === 0) {
+    return { ok: false, summary: 'No commits selected', error: 'No commits selected.' };
+  }
+  const args = ['cherry-pick'];
+  if (noCommit) args.push('-n');
+  args.push(...shas);
+  try {
+    await runGit(repoPath, args);
+    return {
+      ok: true,
+      summary: noCommit
+        ? `Applied ${shas.length} commit(s) to working tree (not committed)`
+        : `Cherry-picked ${shas.length} commit(s) onto current branch`
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      summary: 'Cherry-pick failed',
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+
+export async function checkoutFileFromRef(
+  repoPath: string,
+  ref: string,
+  filePath: string
+): Promise<void> {
+  await runGit(repoPath, ['checkout', ref, '--', filePath]);
+}
+
+export async function checkoutFilesFromRef(
+  repoPath: string,
+  ref: string,
+  filePaths: string[]
+): Promise<void> {
+  if (filePaths.length === 0) return;
+  await runGit(repoPath, ['checkout', ref, '--', ...filePaths]);
+}
+
+export async function compareBranchWithCurrent(
+  repo: Pick<RepoSummary, 'id' | 'name' | 'path' | 'branch'>,
+  targetBranch: string,
+  mode: 'direct' | 'target-only' = 'direct',
+  baseBranch?: string
+): Promise<BranchCompareResult> {
+  const cleanTarget = targetBranch.trim();
+  if (!cleanTarget) {
+    throw new Error('Target branch cannot be empty.');
+  }
+  const cleanBase = baseBranch?.trim();
+  const baseRef = cleanBase || 'HEAD';
+
+  // Commits reachable from targetBranch that are not on baseRef
+  const commitsOnTarget = await getRepoCommits(
+    repo,
+    80,
+    `${baseRef}..${cleanTarget}`
+  );
+
+  // Direct diff (baseRef vs targetBranch) vs Target-only (baseRef...targetBranch since merge-base)
+  let nameStatusRaw = '';
+  let numstatRaw = '';
+  let directChangedPaths: Set<string> | null = null;
+  if (mode === 'direct') {
+    [nameStatusRaw, numstatRaw] = await Promise.all([
+      runGit(repo.path, ['diff', '--name-status', '-M', '-z', baseRef, cleanTarget]).catch(
+        () => ''
+      ),
+      runGit(repo.path, ['diff', '--numstat', '-M', '-z', baseRef, cleanTarget]).catch(
+        () => ''
+      )
+    ]);
+  } else {
+    try {
+      const [nsRaw, numRaw, directNamesRaw] = await Promise.all([
+        runGit(repo.path, ['diff', '--name-status', '-M', '-z', `${baseRef}...${cleanTarget}`]),
+        runGit(repo.path, ['diff', '--numstat', '-M', '-z', `${baseRef}...${cleanTarget}`]).catch(
+          () => ''
+        ),
+        runGit(repo.path, ['diff', '--name-only', '-z', baseRef, cleanTarget]).catch(
+          () => ''
+        )
+      ]);
+      nameStatusRaw = nsRaw;
+      numstatRaw = numRaw;
+      directChangedPaths = new Set(
+        directNamesRaw.split('\0').filter(Boolean).map(toPosixPath)
+      );
+    } catch {
+      [nameStatusRaw, numstatRaw] = await Promise.all([
+        runGit(repo.path, ['diff', '--name-status', '-M', '-z', baseRef, cleanTarget]).catch(
+          () => ''
+        ),
+        runGit(repo.path, ['diff', '--numstat', '-M', '-z', baseRef, cleanTarget]).catch(
+          () => ''
+        )
+      ]);
+    }
+  }
+
+  const statMap = new Map<
+    string,
+    { additions: number | null; deletions: number | null }
+  >();
+  if (numstatRaw) {
+    const tokens = numstatRaw.split('\0');
+    let i = 0;
+    while (i < tokens.length) {
+      const line = tokens[i];
+      i += 1;
+      if (!line) continue;
+      const parts = line.split('\t');
+      if (parts.length < 3) continue;
+      const addVal = parts[0] === '-' ? null : Number(parts[0]);
+      const delVal = parts[1] === '-' ? null : Number(parts[1]);
+      let filePath = parts[2];
+      if (!filePath && i + 1 < tokens.length) {
+        i += 1;
+        filePath = tokens[i] ?? '';
+        i += 1;
+      }
+      if (filePath) {
+        statMap.set(toPosixPath(filePath), {
+          additions: Number.isFinite(addVal as number) ? addVal : null,
+          deletions: Number.isFinite(delVal as number) ? delVal : null
+        });
+      }
+    }
+  }
+
+  const changedFiles: CommitFileChange[] = [];
+  const tokens = nameStatusRaw.split('\0');
+  let i = 0;
+  while (i < tokens.length) {
+    const statusTok = tokens[i];
+    i += 1;
+    if (!statusTok) continue;
+    const code = statusTok[0];
+    if (code === 'R' || code === 'C') {
+      const oldP = toPosixPath(tokens[i] ?? '');
+      const newP = toPosixPath(tokens[i + 1] ?? '');
+      i += 2;
+      if (newP) {
+        const stats = statMap.get(newP) ?? { additions: null, deletions: null };
+        const matchesBase = directChangedPaths
+          ? !(directChangedPaths.has(newP) || (oldP ? directChangedPaths.has(oldP) : false))
+          : false;
+        changedFiles.push({
+          path: newP,
+          oldPath: oldP,
+          status: mapStatusCode(code),
+          ...stats,
+          matchesBase
+        });
+      }
+    } else {
+      const filePath = toPosixPath(tokens[i] ?? '');
+      i += 1;
+      if (filePath) {
+        const stats = statMap.get(filePath) ?? {
+          additions: null,
+          deletions: null
+        };
+        const matchesBase = directChangedPaths
+          ? !directChangedPaths.has(filePath)
+          : false;
+        changedFiles.push({
+          path: filePath,
+          status: mapStatusCode(code),
+          ...stats,
+          matchesBase
+        });
+      }
+    }
+  }
+
+  changedFiles.sort((a, b) => a.path.localeCompare(b.path));
+
+  return {
+    currentBranch: cleanBase || repo.branch,
+    targetBranch: cleanTarget,
+    commitsOnTarget,
+    changedFiles
+  };
 }

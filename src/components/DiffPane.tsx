@@ -71,6 +71,7 @@ interface DiffPaneProps {
   editorFontSize?: number;
   onChangeViewerState: (next: ActiveViewerState) => void;
   onUpdateCompareSlots: (left: CompareSlot, right: CompareSlot) => void;
+  onOpenCompareSetup?: () => void;
 }
 
 function slotToSource(slot: CompareSlot): CompareSource {
@@ -97,7 +98,8 @@ export const DiffPane: React.FC<DiffPaneProps> = ({
   editorFont,
   editorFontSize,
   onChangeViewerState,
-  onUpdateCompareSlots
+  onUpdateCompareSlots,
+  onOpenCompareSetup
 }) => {
   const [sideBySide, setSideBySide] = useState(true);
   const [ignoreTrimWhitespace, setIgnoreTrimWhitespace] = useState(false);
@@ -255,6 +257,15 @@ export const DiffPane: React.FC<DiffPaneProps> = ({
             pick files for A/B compare, or <strong>Commit Explorer</strong> to
             audit recent and unpushed commits.
           </div>
+          {onOpenCompareSetup && repos.length > 0 && (
+            <button
+              className="btn"
+              onClick={onOpenCompareSetup}
+              style={{ marginTop: 4 }}
+            >
+              <GitCompare size={13} /> Choose Repo &amp; Branches to Compare...
+            </button>
+          )}
         </div>
       </div>
     );
@@ -401,7 +412,19 @@ export const DiffPane: React.FC<DiffPaneProps> = ({
             </>
           )}
           {viewerState.mode === 'custom-compare' && (
-            <span style={{ fontWeight: 600 }}>Compare A ↔ B</span>
+            <>
+              <span style={{ fontWeight: 600 }}>Compare A ↔ B</span>
+              {onOpenCompareSetup && (
+                <button
+                  className="btn"
+                  style={{ padding: '2px 8px', fontSize: '0.846rem' }}
+                  onClick={onOpenCompareSetup}
+                  title="Choose repo, branches, or files to compare"
+                >
+                  Choose...
+                </button>
+              )}
+            </>
           )}
         </div>
 

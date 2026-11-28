@@ -37,6 +37,7 @@ import {
 } from '../shared/types';
 import { ChangesSidebar, makeChangeKey } from './components/ChangesSidebar';
 import { CommitExplorerSidebar } from './components/CommitExplorerSidebar';
+import { BranchCompareSidebar } from './components/BranchCompareSidebar';
 import {
   ActiveViewerState,
   CompareSlot,
@@ -49,12 +50,16 @@ import { UpdateProjectModal } from './components/UpdateProjectModal';
 import { RepoBranchModal } from './components/RepoBranchModal';
 import { BatchBranchModal } from './components/BatchBranchModal';
 import {
+  CompareSetupModal,
+  CompareSetupSeed
+} from './components/CompareSetupModal';
+import {
   FontPreferences,
   loadFontPreferences,
   saveAndApplyFontPreferences
 } from './utils/fontPreferences';
 
-type SidebarTab = 'changes' | 'files' | 'commits';
+type SidebarTab = 'changes' | 'files' | 'commits' | 'branch-compare';
 
 const AUTO_SCAN_INTERVAL_MS = 15_000;
 
@@ -170,6 +175,17 @@ export const App: React.FC = () => {
   const [branchTargetRepo, setBranchTargetRepo] = useState<RepoSummary | null>(
     null
   );
+  const [branchCompareSeed, setBranchCompareSeed] = useState<{
+    repoId: string;
+    baseBranch?: string | null;
+    targetBranch: string | null;
+  } | null>(null);
+  const [compareSetupOpen, setCompareSetupOpen] = useState(false);
+  const [compareSetupSeed, setCompareSetupSeed] =
+    useState<CompareSetupSeed | null>(null);
+  const [selectedBranchCompareFile, setSelectedBranchCompareFile] = useState<
+    string | null
+  >(null);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const [autoScanEnabled, setAutoScanEnabled] = useState(true);
@@ -608,6 +624,101 @@ export const App: React.FC = () => {
     return results;
   };
 
+  const handleDeleteLocalBranch = async (
+    repo: RepoSummary,
+    branchName: string,
+    force: boolean
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      await window.gitViewer.deleteLocalBranch(repo.path, branchName, force);
+      showToast(
+        'success',
+        `${repo.name}: deleted local branch "${branchName}"`
+      );
+      await refreshWorkspace(rootPath, true);
+      return { ok: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (force) {
+        showToast('error', `${repo.name}: ${message}`);
+      }
+      return { ok: false, error: message };
+    }
+  };
+
+  const handleCherryPickCommits = async (
+    repoPath: string,
+    shas: string[],
+    noCommit: boolean
+  ) => {
+    const res = await window.gitViewer.cherryPickCommits(
+      repoPath,
+      shas,
+      noCommit
+    );
+    if (res.ok) {
+      showToast('success', res.summary);
+    } else {
+      showToast(
+        'error',
+        `Cherry-pick failed: ${res.error || 'resolve conflicts in Changes tab'}`
+      );
+    }
+    await refreshWorkspace(rootPath, true);
+  };
+
+  const handleGetFileFromRef = async (
+    repoPath: string,
+    ref: string,
+    filePath: string
+  ) => {
+    try {
+      await window.gitViewer.checkoutFileFromRef(repoPath, ref, filePath);
+      showToast('success', `Applied ${filePath} from ${ref} to working tree`);
+      await refreshWorkspace(rootPath, false);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to apply file from ref'
+      );
+    }
+  };
+
+  const handleGetFilesFromRef = async (
+    repoPath: string,
+    ref: string,
+    filePaths: string[]
+  ) => {
+    if (filePaths.length === 0) return;
+    try {
+      await window.gitViewer.checkoutFilesFromRef(repoPath, ref, filePaths);
+      showToast(
+        'success',
+        `Applied ${filePaths.length} file(s) from ${ref} to working tree`
+      );
+      await refreshWorkspace(rootPath, false);
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to apply files from ref'
+      );
+    }
+  };
+
+  const handleOpenBranchCompare = (
+    repo: RepoSummary,
+    targetBranch?: string,
+    baseBranch?: string
+  ) => {
+    setBranchCompareSeed({
+      repoId: repo.id,
+      baseBranch: baseBranch ?? null,
+      targetBranch: targetBranch ?? null
+    });
+    setActiveTab('branch-compare');
+    setSidebarOpen(true);
+  };
+
   const handleFetchAll = async () => {
     if (isFetchingAll || orderedRepos.length === 0) return;
     setIsFetchingAll(true);
@@ -739,9 +850,38 @@ export const App: React.FC = () => {
     return grouped;
   };
 
-  const handleCommitChecked = async (message: string) => {
+  const reportCommitResults = async (
+    results: { repoName: string; ok: boolean; sha?: string; branch?: string; error?: string }[],
+    label: string
+  ): Promise<boolean> => {
+    const okCount = results.filter((r) => r.ok).length;
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length > 0) {
+      showToast(
+        'error',
+        `${okCount > 0 ? `Committed ${okCount} repo(s). ` : ''}Failed in ${failed[0].repoName}: ${failed[0].error}`
+      );
+      if (okCount > 0) {
+        await refreshWorkspace(rootPath, true);
+      }
+      return false;
+    }
+    showToast(
+      'success',
+      `${label} across ${okCount} repo(s): ${results
+        .map((r) => `${r.repoName}${r.branch ? ` (${r.branch})` : ''}@${r.sha}`)
+        .join(', ')}`
+    );
+    await refreshWorkspace(rootPath, true);
+    return true;
+  };
+
+  const handleCommitChecked = async (
+    message: string,
+    newBranchName?: string
+  ): Promise<boolean> => {
     const grouped = getCheckedByRepo();
-    if (grouped.length === 0) return;
+    if (grouped.length === 0) return false;
     setIsCommitting(true);
     try {
       const results = await window.gitViewer.commitAcrossRepos(
@@ -750,24 +890,19 @@ export const App: React.FC = () => {
           repoName: g.repo.name,
           paths: g.paths
         })),
-        message
+        message,
+        newBranchName
       );
-      const okCount = results.filter((r) => r.ok).length;
-      const failed = results.filter((r) => !r.ok);
-      if (failed.length > 0) {
-        showToast(
-          'error',
-          `Committed ${okCount} repo(s). Failed in ${failed[0].repoName}: ${failed[0].error}`
-        );
-      } else {
-        showToast(
-          'success',
-          `Committed across ${okCount} repo(s): ${results
-            .map((r) => `${r.repoName}@${r.sha}`)
-            .join(', ')}`
-        );
-      }
-      await refreshWorkspace(rootPath, true);
+      return await reportCommitResults(
+        results,
+        newBranchName ? `Created branch & committed` : 'Committed'
+      );
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to commit changes'
+      );
+      return false;
     } finally {
       setIsCommitting(false);
     }
@@ -781,10 +916,31 @@ export const App: React.FC = () => {
     await refreshWorkspace(rootPath, false);
   };
 
+  const switchOpenStagedViewerToWorking = (
+    repoPath: string,
+    unstagedPaths?: string[]
+  ) => {
+    setViewerState((prev) => {
+      if (
+        !prev ||
+        prev.mode !== 'working-diff' ||
+        prev.repo.path !== repoPath ||
+        (prev.preset !== 'head-staged' && prev.preset !== 'staged-working')
+      ) {
+        return prev;
+      }
+      if (unstagedPaths && !unstagedPaths.includes(prev.filePath)) {
+        return prev;
+      }
+      return { ...prev, preset: 'head-working' };
+    });
+  };
+
   const handleUnstageChecked = async () => {
     const grouped = getCheckedByRepo();
     for (const g of grouped) {
       await window.gitViewer.unstageFiles(g.repo.path, g.paths);
+      switchOpenStagedViewerToWorking(g.repo.path, g.paths);
     }
     await refreshWorkspace(rootPath, false);
   };
@@ -809,7 +965,10 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleCommitStaged = async (message: string) => {
+  const handleCommitStaged = async (
+    message: string,
+    newBranchName?: string
+  ): Promise<boolean> => {
     const targets = orderedRepos
       .filter((r) =>
         r.changes.some(
@@ -817,29 +976,24 @@ export const App: React.FC = () => {
         )
       )
       .map((r) => ({ repoPath: r.path, repoName: r.name }));
-    if (targets.length === 0) return;
+    if (targets.length === 0) return false;
     setIsCommitting(true);
     try {
       const results = await window.gitViewer.commitStagedAcrossRepos(
         targets,
-        message
+        message,
+        newBranchName
       );
-      const okCount = results.filter((r) => r.ok).length;
-      const failed = results.filter((r) => !r.ok);
-      if (failed.length > 0) {
-        showToast(
-          'error',
-          `Committed staged in ${okCount} repo(s). Failed in ${failed[0].repoName}: ${failed[0].error}`
-        );
-      } else {
-        showToast(
-          'success',
-          `Committed staged changes across ${okCount} repo(s): ${results
-            .map((r) => `${r.repoName}@${r.sha}`)
-            .join(', ')}`
-        );
-      }
-      await refreshWorkspace(rootPath, true);
+      return await reportCommitResults(
+        results,
+        newBranchName ? 'Created branch & committed staged' : 'Committed staged changes'
+      );
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Failed to commit staged changes'
+      );
+      return false;
     } finally {
       setIsCommitting(false);
     }
@@ -861,6 +1015,7 @@ export const App: React.FC = () => {
   const handleUnstageAllRepo = async (repo: RepoSummary) => {
     try {
       await window.gitViewer.unstageAll(repo.path);
+      switchOpenStagedViewerToWorking(repo.path);
       showToast('success', `Unstaged all changes in ${repo.name}`);
       await refreshWorkspace(rootPath, false);
     } catch (err) {
@@ -880,6 +1035,7 @@ export const App: React.FC = () => {
   const handleUnstageManyFiles = async (repo: RepoSummary, paths: string[]) => {
     if (paths.length === 0) return;
     await window.gitViewer.unstageFiles(repo.path, paths);
+    switchOpenStagedViewerToWorking(repo.path, paths);
     await refreshWorkspace(rootPath, false);
   };
 
@@ -1044,6 +1200,7 @@ export const App: React.FC = () => {
 
   const handleUnstageFile = async (repo: RepoSummary, file: ChangedFile) => {
     await window.gitViewer.unstageFiles(repo.path, [file.path]);
+    switchOpenStagedViewerToWorking(repo.path, [file.path]);
     await refreshWorkspace(rootPath, false);
   };
 
@@ -1096,35 +1253,26 @@ export const App: React.FC = () => {
     });
   };
 
-  const openEmptyCompare = () => {
-    if (compareLeft && compareRight) {
-      setViewerState({
-        mode: 'custom-compare',
-        left: compareLeft,
-        right: compareRight
-      });
-      return;
-    }
-    const firstRepo = repos[0];
-    if (!firstRepo) return;
-    const firstPath = firstRepo.changes[0]?.path ?? '';
-    const left: CompareSlot = {
-      repoPath: firstRepo.path,
-      repoName: firstRepo.name,
-      filePath: firstPath,
-      refMode: 'HEAD',
-      customRef: ''
-    };
-    const right: CompareSlot = {
-      repoPath: firstRepo.path,
-      repoName: firstRepo.name,
-      filePath: firstPath,
-      refMode: 'working',
-      customRef: ''
-    };
-    setCompareLeft(left);
-    setCompareRight(right);
-    setViewerState({ mode: 'custom-compare', left, right });
+  const openCompareSetup = (seed?: CompareSetupSeed) => {
+    if (orderedRepos.length === 0) return;
+    const activeRepoId =
+      seed?.repoId ??
+      (viewerState?.mode === 'working-diff' || viewerState?.mode === 'file-view'
+        ? viewerState.repo.id
+        : viewerState?.mode === 'commit-diff'
+          ? orderedRepos.find((r) => r.path === viewerState.repoPath)?.id
+          : viewerState?.mode === 'custom-compare'
+            ? orderedRepos.find((r) => r.path === viewerState.left.repoPath)?.id
+            : branchCompareSeed?.repoId) ??
+      orderedRepos[0]?.id;
+    setCompareSetupSeed({
+      mode: seed?.mode ?? 'branches',
+      repoId: activeRepoId,
+      filePath: seed?.filePath,
+      baseBranch: seed?.baseBranch,
+      targetBranch: seed?.targetBranch
+    });
+    setCompareSetupOpen(true);
   };
 
   const selectedChangeKey =
@@ -1514,7 +1662,7 @@ export const App: React.FC = () => {
           <button
             className={`rail-btn ${sidebarOpen && activeTab === 'commits' ? 'active' : ''}`}
             onClick={() => handleRailTabClick('commits')}
-            title="Commit Explorer (Recent, Unpushed & Since Baseline)"
+            title="Commit Explorer (Browse Current/Other Branches & Cherry-Pick)"
           >
             <GitCommitHorizontal size={18} />
             {totals.unpushedCommits > 0 && (
@@ -1528,11 +1676,21 @@ export const App: React.FC = () => {
           </button>
 
           <button
+            className={`rail-btn ${sidebarOpen && activeTab === 'branch-compare' ? 'active' : ''}`}
+            onClick={() => handleRailTabClick('branch-compare')}
+            title="Compare Branches (Current vs Another Branch + Cherry-Pick)"
+          >
+            <GitBranch size={18} />
+          </button>
+
+          <button
             className={`rail-btn ${
-              viewerState?.mode === 'custom-compare' ? 'active' : ''
+              compareSetupOpen || viewerState?.mode === 'custom-compare'
+                ? 'active'
+                : ''
             }`}
-            onClick={openEmptyCompare}
-            title="Compare A ↔ B (Any File, Commit, or Branch)"
+            onClick={() => openCompareSetup()}
+            title="Compare Repository, Branches, or Files..."
           >
             <GitCompare size={18} />
           </button>
@@ -1628,6 +1786,9 @@ export const App: React.FC = () => {
               onRestoreSkipWorktreeRepo={handleRestoreSkipWorktreeRepo}
               onRemoteAction={handleRemoteAction}
               onOpenBranchModal={setBranchTargetRepo}
+              onOpenBranchCompare={(repo) =>
+                openCompareSetup({ mode: 'branches', repoId: repo.id })
+              }
               onCopyHarnessPlan={handleCopyHarnessPlan}
               onOpenRepoInNewWindow={handleOpenRepoInNewWindow}
               onReorderRepo={handleReorderRepo}
@@ -1682,6 +1843,16 @@ export const App: React.FC = () => {
               onRemoteAction={handleRemoteAction}
               onRestoreSkipWorktreeRepo={handleRestoreSkipWorktreeRepo}
               onOpenBranchModal={setBranchTargetRepo}
+              onOpenBranchCompare={(repo) =>
+                openCompareSetup({ mode: 'branches', repoId: repo.id })
+              }
+              onCompareWithBranch={(repo, filePath) =>
+                openCompareSetup({
+                  mode: 'file',
+                  repoId: repo.id,
+                  filePath
+                })
+              }
             />
           )}
 
@@ -1712,6 +1883,63 @@ export const App: React.FC = () => {
                   oldPath: file.oldPath
                 });
               }}
+              onCherryPickCommits={handleCherryPickCommits}
+              onGetFileFromRef={handleGetFileFromRef}
+              onCompareWithA={(repoPath, filePath, ref) => {
+                const repo = repos.find((r) => r.path === repoPath);
+                openCustomCompare('A', {
+                  repoPath,
+                  repoName: repo?.name ?? repoPath,
+                  filePath,
+                  refMode: 'custom',
+                  customRef: ref
+                });
+              }}
+              onCompareWithB={(repoPath, filePath, ref) => {
+                const repo = repos.find((r) => r.path === repoPath);
+                openCustomCompare('B', {
+                  repoPath,
+                  repoName: repo?.name ?? repoPath,
+                  filePath,
+                  refMode: 'custom',
+                  customRef: ref
+                });
+              }}
+            />
+          )}
+
+          {activeTab === 'branch-compare' && (
+            <BranchCompareSidebar
+              repos={orderedRepos}
+              initialRepoId={branchCompareSeed?.repoId}
+              initialBaseBranch={branchCompareSeed?.baseBranch}
+              initialTargetBranch={branchCompareSeed?.targetBranch}
+              viewMode={viewMode}
+              onChangeViewMode={setViewMode}
+              selectedCompareFile={selectedBranchCompareFile}
+              onSelectCompareFile={(repo, targetBranch, file, baseBranch) => {
+                setSelectedBranchCompareFile(file.path);
+                const left: CompareSlot = {
+                  repoPath: repo.path,
+                  repoName: repo.name,
+                  filePath: file.oldPath ?? file.path,
+                  refMode: baseBranch ? 'custom' : 'HEAD',
+                  customRef: baseBranch ?? ''
+                };
+                const right: CompareSlot = {
+                  repoPath: repo.path,
+                  repoName: repo.name,
+                  filePath: file.path,
+                  refMode: 'custom',
+                  customRef: targetBranch
+                };
+                setCompareLeft(left);
+                setCompareRight(right);
+                setViewerState({ mode: 'custom-compare', left, right });
+              }}
+              onCherryPickCommits={handleCherryPickCommits}
+              onGetFileFromRef={handleGetFileFromRef}
+              onGetFilesFromRef={handleGetFilesFromRef}
               onCompareWithA={(repoPath, filePath, ref) => {
                 const repo = repos.find((r) => r.path === repoPath);
                 openCustomCompare('A', {
@@ -1759,6 +1987,19 @@ export const App: React.FC = () => {
             setCompareRight(right);
             setViewerState({ mode: 'custom-compare', left, right });
           }}
+          onOpenCompareSetup={() =>
+            openCompareSetup(
+              viewerState?.mode === 'custom-compare'
+                ? {
+                    mode: 'file',
+                    repoId: orderedRepos.find(
+                      (r) => r.path === viewerState.left.repoPath
+                    )?.id,
+                    filePath: viewerState.left.filePath
+                  }
+                : { mode: 'branches' }
+            )
+          }
         />
         </div>
       )}
@@ -1787,6 +2028,10 @@ export const App: React.FC = () => {
         <RepoBranchModal
           repo={branchTargetRepo}
           onCheckout={handleCheckoutSingleBranch}
+          onDeleteBranch={handleDeleteLocalBranch}
+          onCompareBranch={(repo, targetBranch) =>
+            handleOpenBranchCompare(repo, targetBranch)
+          }
           onClose={() => setBranchTargetRepo(null)}
         />
       )}
@@ -1796,6 +2041,33 @@ export const App: React.FC = () => {
           repos={orderedRepos}
           onRunSwitchAll={handleBatchCheckoutBranches}
           onClose={() => setBatchBranchModalOpen(false)}
+        />
+      )}
+
+      {compareSetupOpen && (
+        <CompareSetupModal
+          open={compareSetupOpen}
+          repos={orderedRepos}
+          initialSeed={compareSetupSeed}
+          hasLastCustomCompare={Boolean(compareLeft && compareRight)}
+          onClose={() => setCompareSetupOpen(false)}
+          onStartBranchCompare={(repo, baseBranch, targetBranch) =>
+            handleOpenBranchCompare(repo, targetBranch, baseBranch)
+          }
+          onStartFileCompare={(left, right) => {
+            setCompareLeft(left);
+            setCompareRight(right);
+            setViewerState({ mode: 'custom-compare', left, right });
+          }}
+          onReopenLastCustomCompare={() => {
+            if (compareLeft && compareRight) {
+              setViewerState({
+                mode: 'custom-compare',
+                left: compareLeft,
+                right: compareRight
+              });
+            }
+          }}
         />
       )}
     </div>

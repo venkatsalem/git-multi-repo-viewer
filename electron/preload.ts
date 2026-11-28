@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
+  BranchCompareResult,
   BranchListResult,
   CommitActionTarget,
   CommitFileChange,
@@ -28,7 +29,8 @@ export interface GitViewerApi {
   watchWorkspace: (rootPath: string) => Promise<void>;
   getRepoCommits: (
     repo: Pick<RepoSummary, 'id' | 'name' | 'path'>,
-    limit?: number
+    limit?: number,
+    branchRef?: string
   ) => Promise<CommitInfo[]>;
   getCommitFiles: (repoPath: string, sha: string) => Promise<CommitFileChange[]>;
   listRepoFiles: (repoPath: string) => Promise<FileEntry[]>;
@@ -44,11 +46,13 @@ export interface GitViewerApi {
   ) => Promise<void>;
   commitAcrossRepos: (
     targets: CommitActionTarget[],
-    message: string
+    message: string,
+    newBranchName?: string
   ) => Promise<CommitResultItem[]>;
   commitStagedAcrossRepos: (
     targets: { repoPath: string; repoName: string }[],
-    message: string
+    message: string,
+    newBranchName?: string
   ) => Promise<CommitResultItem[]>;
   stageAll: (repoPath: string) => Promise<void>;
   unstageAll: (repoPath: string) => Promise<void>;
@@ -84,6 +88,32 @@ export interface GitViewerApi {
     targetBranch: string,
     createIfMissing: boolean
   ) => Promise<RepoBatchResultItem[]>;
+  deleteLocalBranch: (
+    repoPath: string,
+    branchName: string,
+    force?: boolean
+  ) => Promise<void>;
+  cherryPickCommits: (
+    repoPath: string,
+    shas: string[],
+    noCommit?: boolean
+  ) => Promise<{ ok: boolean; summary: string; error?: string }>;
+  checkoutFileFromRef: (
+    repoPath: string,
+    ref: string,
+    filePath: string
+  ) => Promise<void>;
+  checkoutFilesFromRef: (
+    repoPath: string,
+    ref: string,
+    filePaths: string[]
+  ) => Promise<void>;
+  compareBranchWithCurrent: (
+    repo: Pick<RepoSummary, 'id' | 'name' | 'path' | 'branch'>,
+    targetBranch: string,
+    mode?: 'direct' | 'target-only',
+    baseBranch?: string
+  ) => Promise<BranchCompareResult>;
   onWorkspaceChanged: (callback: () => void) => () => void;
   setThemeSource: (source: 'system' | 'light' | 'dark') => Promise<void>;
   showInExplorer: (targetPath: string, isFile?: boolean) => Promise<void>;
@@ -97,8 +127,8 @@ const api: GitViewerApi = {
   getInitialRoot: () => ipcRenderer.invoke('workspace:getInitialRoot'),
   scanWorkspace: (rootPath) => ipcRenderer.invoke('workspace:scan', rootPath),
   watchWorkspace: (rootPath) => ipcRenderer.invoke('workspace:watch', rootPath),
-  getRepoCommits: (repo, limit) =>
-    ipcRenderer.invoke('repo:getCommits', repo, limit),
+  getRepoCommits: (repo, limit, branchRef) =>
+    ipcRenderer.invoke('repo:getCommits', repo, limit, branchRef),
   getCommitFiles: (repoPath, sha) =>
     ipcRenderer.invoke('repo:getCommitFiles', repoPath, sha),
   listRepoFiles: (repoPath) => ipcRenderer.invoke('repo:listFiles', repoPath),
@@ -112,10 +142,15 @@ const api: GitViewerApi = {
     ipcRenderer.invoke('git:unstage', repoPath, paths),
   discardFiles: (repoPath, paths, untrackedPaths) =>
     ipcRenderer.invoke('git:discard', repoPath, paths, untrackedPaths),
-  commitAcrossRepos: (targets, message) =>
-    ipcRenderer.invoke('git:commitAcrossRepos', targets, message),
-  commitStagedAcrossRepos: (targets, message) =>
-    ipcRenderer.invoke('git:commitStagedAcrossRepos', targets, message),
+  commitAcrossRepos: (targets, message, newBranchName) =>
+    ipcRenderer.invoke('git:commitAcrossRepos', targets, message, newBranchName),
+  commitStagedAcrossRepos: (targets, message, newBranchName) =>
+    ipcRenderer.invoke(
+      'git:commitStagedAcrossRepos',
+      targets,
+      message,
+      newBranchName
+    ),
   stageAll: (repoPath) => ipcRenderer.invoke('git:stageAll', repoPath),
   unstageAll: (repoPath) => ipcRenderer.invoke('git:unstageAll', repoPath),
   ignorePattern: (repoPath, pattern, target, untrackPaths) =>
@@ -139,6 +174,22 @@ const api: GitViewerApi = {
       repos,
       targetBranch,
       createIfMissing
+    ),
+  deleteLocalBranch: (repoPath, branchName, force) =>
+    ipcRenderer.invoke('git:deleteLocalBranch', repoPath, branchName, force),
+  cherryPickCommits: (repoPath, shas, noCommit) =>
+    ipcRenderer.invoke('git:cherryPickCommits', repoPath, shas, noCommit),
+  checkoutFileFromRef: (repoPath, ref, filePath) =>
+    ipcRenderer.invoke('git:checkoutFileFromRef', repoPath, ref, filePath),
+  checkoutFilesFromRef: (repoPath, ref, filePaths) =>
+    ipcRenderer.invoke('git:checkoutFilesFromRef', repoPath, ref, filePaths),
+  compareBranchWithCurrent: (repo, targetBranch, mode, baseBranch) =>
+    ipcRenderer.invoke(
+      'git:compareBranchWithCurrent',
+      repo,
+      targetBranch,
+      mode,
+      baseBranch
     ),
   onWorkspaceChanged: (callback) => {
     const handler = () => callback();

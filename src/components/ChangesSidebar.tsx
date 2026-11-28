@@ -18,6 +18,7 @@ import {
   FolderTree,
   GitBranch,
   GitCommitHorizontal,
+  GitCompare,
   List,
   MinusCircle,
   PauseCircle,
@@ -62,8 +63,8 @@ interface ChangesSidebarProps {
   ) => void;
   onCompareWithA: (repo: RepoSummary, filePath: string) => void;
   onCompareWithB: (repo: RepoSummary, filePath: string) => void;
-  onCommitChecked: (message: string) => Promise<void>;
-  onCommitStaged: (message: string) => Promise<void>;
+  onCommitChecked: (message: string, newBranchName?: string) => Promise<boolean>;
+  onCommitStaged: (message: string, newBranchName?: string) => Promise<boolean>;
   onDiscardChecked: () => Promise<void>;
   onStageChecked: () => Promise<void>;
   onUnstageChecked: () => Promise<void>;
@@ -93,6 +94,7 @@ interface ChangesSidebarProps {
     action: 'fetch' | 'pull' | 'push'
   ) => Promise<void>;
   onOpenBranchModal: (repo: RepoSummary) => void;
+  onOpenBranchCompare: (repo: RepoSummary) => void;
   onCopyHarnessPlan: (repoScope?: RepoSummary) => void;
   onOpenRepoInNewWindow: (repoPath: string) => void;
   onReorderRepo: (
@@ -145,6 +147,7 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
   onRestoreSkipWorktreeRepo,
   onRemoteAction,
   onOpenBranchModal,
+  onOpenBranchCompare,
   onCopyHarnessPlan,
   onOpenRepoInNewWindow,
   onReorderRepo,
@@ -159,6 +162,10 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
   const [commitMessage, setCommitMessage] = useState('');
   const [commitModalOpen, setCommitModalOpen] = useState(false);
   const [commitMode, setCommitMode] = useState<'checked' | 'staged'>('checked');
+  const [branchTargetMode, setBranchTargetMode] = useState<'current' | 'new'>(
+    'current'
+  );
+  const [newBranchName, setNewBranchName] = useState('');
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [isDiscardingChecked, setIsDiscardingChecked] = useState(false);
 
@@ -295,20 +302,39 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
   const checkedSummary = useMemo(() => {
     let fileCount = 0;
     let untrackedCount = 0;
-    const repoIds = new Set<string>();
+    const repoTargetsMap = new Map<
+      string,
+      { repoId: string; repoName: string; branch: string; fileCount: number }
+    >();
     const checkedKeyList: string[] = [];
-    const items: Array<{ repoName: string; path: string; untracked: boolean }> =
-      [];
+    const items: Array<{
+      repoName: string;
+      branch: string;
+      path: string;
+      untracked: boolean;
+    }> = [];
     for (const r of repos) {
       for (const c of r.changes) {
         const key = makeChangeKey(r.id, c.path);
         if (checkedKeys.has(key) && !heldKeys.has(key)) {
           fileCount += 1;
           if (c.untracked) untrackedCount += 1;
-          repoIds.add(r.id);
+          const branch = r.branch || 'HEAD';
+          const existing = repoTargetsMap.get(r.id);
+          if (existing) {
+            existing.fileCount += 1;
+          } else {
+            repoTargetsMap.set(r.id, {
+              repoId: r.id,
+              repoName: r.name,
+              branch,
+              fileCount: 1
+            });
+          }
           checkedKeyList.push(key);
           items.push({
             repoName: r.name,
+            branch,
             path: c.path,
             untracked: c.untracked
           });
@@ -319,24 +345,44 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
       fileCount,
       untrackedCount,
       trackedCount: fileCount - untrackedCount,
-      repoCount: repoIds.size,
+      repoCount: repoTargetsMap.size,
+      repoTargets: Array.from(repoTargetsMap.values()),
       checkedKeyList,
       items
     };
   }, [repos, checkedKeys, heldKeys]);
 
   const stagedSummary = useMemo(() => {
-    const repoIds = new Set<string>();
-    const items: Array<{ repoName: string; path: string }> = [];
+    const repoTargetsMap = new Map<
+      string,
+      { repoId: string; repoName: string; branch: string; fileCount: number }
+    >();
+    const items: Array<{ repoName: string; branch: string; path: string }> =
+      [];
     for (const r of repos) {
       for (const c of r.changes) {
         if (c.staged && !heldKeys.has(makeChangeKey(r.id, c.path))) {
-          repoIds.add(r.id);
-          items.push({ repoName: r.name, path: c.path });
+          const branch = r.branch || 'HEAD';
+          const existing = repoTargetsMap.get(r.id);
+          if (existing) {
+            existing.fileCount += 1;
+          } else {
+            repoTargetsMap.set(r.id, {
+              repoId: r.id,
+              repoName: r.name,
+              branch,
+              fileCount: 1
+            });
+          }
+          items.push({ repoName: r.name, branch, path: c.path });
         }
       }
     }
-    return { repoCount: repoIds.size, items };
+    return {
+      repoCount: repoTargetsMap.size,
+      repoTargets: Array.from(repoTargetsMap.values()),
+      items
+    };
   }, [repos, heldKeys]);
 
   const toggleRepoExpand = (repoId: string) => {
@@ -406,20 +452,32 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
     } else {
       return;
     }
+    setBranchTargetMode('current');
+    setNewBranchName('');
     setCommitModalOpen(true);
   };
 
   const handleSubmitCommitModal = async () => {
     if (!commitMessage.trim()) return;
+    const cleanNewBranch =
+      branchTargetMode === 'new' ? newBranchName.trim() : undefined;
+    if (branchTargetMode === 'new' && (!cleanNewBranch || /\s/.test(cleanNewBranch))) {
+      return;
+    }
+    let ok = false;
     if (commitMode === 'staged') {
       if (stagedSummary.items.length === 0) return;
-      await onCommitStaged(commitMessage);
+      ok = await onCommitStaged(commitMessage, cleanNewBranch);
     } else {
       if (checkedSummary.fileCount === 0) return;
-      await onCommitChecked(commitMessage);
+      ok = await onCommitChecked(commitMessage, cleanNewBranch);
     }
-    setCommitMessage('');
-    setCommitModalOpen(false);
+    if (ok) {
+      setCommitMessage('');
+      setNewBranchName('');
+      setBranchTargetMode('current');
+      setCommitModalOpen(false);
+    }
   };
 
   const handleConfirmSingleRevert = async () => {
@@ -797,7 +855,7 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
                       <span style={{ flex: 1 }} />
                       <button
                         className="mini-btn"
-                        title="Unstage all staged files in this repo"
+                        title="Unstage all staged files in this repo (moves them to Unstaged without discarding edits)"
                         onClick={() =>
                           void onUnstageManyFiles(
                             repo,
@@ -872,7 +930,7 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
                           <>
                             <button
                               className="mini-btn"
-                              title="Unstage file"
+                              title="Unstage file (keeps local edits in Unstaged)"
                               onClick={() => void onUnstageFile(repo, c)}
                             >
                               −
@@ -1517,7 +1575,18 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
               onOpenBranchModal(repo);
             }}
           >
-            <GitBranch size={14} /> Switch / Create Branch...
+            <GitBranch size={14} /> Switch / Manage Branches...
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
+              onOpenBranchCompare(repo);
+            }}
+          >
+            <GitCompare size={14} /> Compare with Another Branch...
           </button>
 
           <div className="context-menu-divider" />
@@ -1796,141 +1865,299 @@ export const ChangesSidebar: React.FC<ChangesSidebarProps> = ({
         </div>
       )}
 
-      {commitModalOpen && (
-        <div
-          className="modal-backdrop"
-          onClick={() => {
-            if (!isCommitting) setCommitModalOpen(false);
-          }}
-        >
+      {commitModalOpen && (() => {
+        const activeTargets =
+          commitMode === 'staged'
+            ? stagedSummary.repoTargets
+            : checkedSummary.repoTargets;
+        const activeItems =
+          commitMode === 'staged' ? stagedSummary.items : checkedSummary.items;
+        const uniqueBranches = Array.from(
+          new Set(activeTargets.map((t) => t.branch))
+        );
+        const singleBranch =
+          uniqueBranches.length === 1 ? uniqueBranches[0] : null;
+        const cleanNewBranch = newBranchName.trim();
+        const hasBranchSpaces =
+          branchTargetMode === 'new' && /\s/.test(cleanNewBranch);
+        const newBranchInvalid =
+          branchTargetMode === 'new' && (!cleanNewBranch || hasBranchSpaces);
+        const commitButtonLabel = isCommitting
+          ? 'Committing...'
+          : branchTargetMode === 'new'
+            ? cleanNewBranch
+              ? `Create ${cleanNewBranch} & Commit (${activeItems.length})`
+              : `Create Branch & Commit (${activeItems.length})`
+            : singleBranch && singleBranch !== 'HEAD'
+              ? `Commit to ${singleBranch} (${activeItems.length})`
+              : `Commit (${activeItems.length})`;
+
+        return (
           <div
-            className="modal-card commit-modal"
-            onClick={(e) => e.stopPropagation()}
+            className="modal-backdrop"
+            onClick={() => {
+              if (!isCommitting) setCommitModalOpen(false);
+            }}
           >
-            <div className="settings-modal-header">
-              <div className="modal-title">
-                <GitCommitHorizontal
-                  size={17}
-                  style={{ color: 'var(--accent)' }}
-                />
-                <span>Commit Changes</span>
-              </div>
-              <button
-                className="icon-btn"
-                disabled={isCommitting}
-                onClick={() => setCommitModalOpen(false)}
-                title="Close (Esc)"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="update-modal-body">
-              <div className="theme-segmented" style={{ gridTemplateColumns: '1fr 1fr' }}>
+            <div
+              className="modal-card commit-modal"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="settings-modal-header">
+                <div className="modal-title">
+                  <GitCommitHorizontal
+                    size={17}
+                    style={{ color: 'var(--accent)' }}
+                  />
+                  <span>Commit Changes</span>
+                </div>
                 <button
-                  type="button"
-                  disabled={checkedSummary.fileCount === 0 || isCommitting}
-                  className={`theme-segment-btn ${commitMode === 'checked' ? 'active' : ''}`}
-                  onClick={() => setCommitMode('checked')}
-                  title="Stage & commit all checked files"
-                >
-                  Checked Files ({checkedSummary.fileCount}
-                  {checkedSummary.repoCount > 1
-                    ? ` / ${checkedSummary.repoCount} repos`
-                    : ''}
-                  )
-                </button>
-                <button
-                  type="button"
-                  disabled={stagedSummary.items.length === 0 || isCommitting}
-                  className={`theme-segment-btn ${commitMode === 'staged' ? 'active' : ''}`}
-                  onClick={() => setCommitMode('staged')}
-                  title="Commit ONLY currently staged files without adding unstaged changes"
-                >
-                  Staged Only ({stagedSummary.items.length}
-                  {stagedSummary.repoCount > 1
-                    ? ` / ${stagedSummary.repoCount} repos`
-                    : ''}
-                  )
-                </button>
-              </div>
-
-              <div
-                className="modal-path"
-                style={{
-                  maxHeight: 150,
-                  overflowY: 'auto',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 3
-                }}
-              >
-                {(commitMode === 'staged'
-                  ? stagedSummary.items
-                  : checkedSummary.items
-                ).map((item) => (
-                  <div key={`${item.repoName}::${item.path}`}>
-                    <strong>{item.repoName}</strong> / {item.path}
-                  </div>
-                ))}
-              </div>
-
-              <label className="settings-field">
-                <span>Commit Message</span>
-                <textarea
-                  autoFocus
-                  className="commit-modal-textarea"
-                  value={commitMessage}
-                  disabled={isCommitting}
-                  onChange={(e) => setCommitMessage(e.target.value)}
-                  placeholder="Describe what you are committing..."
-                  onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-                      e.preventDefault();
-                      void handleSubmitCommitModal();
-                    }
-                  }}
-                />
-              </label>
-            </div>
-
-            <div className="settings-footer">
-              <span
-                style={{
-                  fontSize: '0.885rem',
-                  color: 'var(--text-secondary)'
-                }}
-              >
-                Press Ctrl+Enter to commit
-              </span>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  className="btn"
+                  className="icon-btn"
                   disabled={isCommitting}
                   onClick={() => setCommitModalOpen(false)}
+                  title="Close (Esc)"
                 >
-                  Cancel
+                  <X size={16} />
                 </button>
-                <button
-                  className="btn btn-primary"
-                  disabled={
-                    isCommitting ||
-                    !commitMessage.trim() ||
-                    (commitMode === 'staged'
-                      ? stagedSummary.items.length === 0
-                      : checkedSummary.fileCount === 0)
-                  }
-                  onClick={() => void handleSubmitCommitModal()}
+              </div>
+
+              <div className="update-modal-body">
+                {activeTargets.length > 0 && (
+                  <div className="commit-target-box">
+                    <div className="commit-target-header">
+                      <span className="commit-target-label">Target branch:</span>
+                      <div
+                        className="segmented"
+                        title="Commit into current branch or create a new branch from HEAD first"
+                      >
+                        <button
+                          type="button"
+                          disabled={isCommitting}
+                          className={branchTargetMode === 'current' ? 'active' : ''}
+                          onClick={() => setBranchTargetMode('current')}
+                        >
+                          Current Branch
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isCommitting}
+                          className={branchTargetMode === 'new' ? 'active' : ''}
+                          onClick={() => setBranchTargetMode('new')}
+                        >
+                          + Create New Branch
+                        </button>
+                      </div>
+                    </div>
+
+                    {branchTargetMode === 'current' ? (
+                      <div className="commit-target-banner">
+                        <span className="commit-target-label">Committing into:</span>
+                        {singleBranch ? (
+                          <>
+                            <span
+                              className={`commit-branch-pill ${singleBranch === 'HEAD' ? 'detached' : ''}`}
+                              title={
+                                singleBranch === 'HEAD'
+                                  ? 'Detached HEAD — switch to or create a new branch above'
+                                  : `Target branch: ${singleBranch}`
+                              }
+                            >
+                              <GitBranch size={13} />
+                              <span>
+                                {singleBranch === 'HEAD'
+                                  ? 'HEAD (detached)'
+                                  : singleBranch}
+                              </span>
+                            </span>
+                            <span className="commit-repo-sub">
+                              {activeTargets.length === 1
+                                ? `in ${activeTargets[0].repoName}`
+                                : `across ${activeTargets.length} repos (${activeTargets.map((t) => t.repoName).join(', ')})`}
+                            </span>
+                          </>
+                        ) : (
+                          activeTargets.map((target) => (
+                            <span
+                              key={target.repoId}
+                              className={`commit-branch-pill ${target.branch === 'HEAD' ? 'detached' : ''}`}
+                              title={`${target.repoName} → ${target.branch} (${target.fileCount} file(s))`}
+                            >
+                              <span>{target.repoName}:</span>
+                              <GitBranch size={12} />
+                              <span>
+                                {target.branch === 'HEAD'
+                                  ? 'HEAD (detached)'
+                                  : target.branch}
+                              </span>
+                              <span style={{ opacity: 0.75, fontWeight: 400 }}>
+                                ({target.fileCount})
+                              </span>
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    ) : (
+                      <div className="commit-new-branch-box">
+                        <div className="commit-new-branch-input-row">
+                          <GitBranch
+                            size={14}
+                            style={{ color: 'var(--accent)', flexShrink: 0 }}
+                          />
+                          <input
+                            className="commit-new-branch-input"
+                            value={newBranchName}
+                            disabled={isCommitting}
+                            onChange={(e) => setNewBranchName(e.target.value)}
+                            placeholder="New branch name (e.g. feature/my-changes)"
+                          />
+                        </div>
+                        {hasBranchSpaces ? (
+                          <div className="commit-branch-hint error">
+                            Branch names cannot contain spaces.
+                          </div>
+                        ) : (
+                          <div className="commit-branch-hint">
+                            Creates{' '}
+                            <strong>{cleanNewBranch || '<new-branch>'}</strong>{' '}
+                            from{' '}
+                            {singleBranch
+                              ? singleBranch === 'HEAD'
+                                ? 'detached HEAD'
+                                : singleBranch
+                              : 'each repo’s current branch'}{' '}
+                            and commits there, leaving{' '}
+                            {singleBranch && singleBranch !== 'HEAD'
+                              ? singleBranch
+                              : 'your original branch'}{' '}
+                            untouched.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div
+                  className="theme-segmented"
+                  style={{ gridTemplateColumns: '1fr 1fr' }}
                 >
-                  {isCommitting
-                    ? 'Committing...'
-                    : `Commit (${commitMode === 'staged' ? stagedSummary.items.length : checkedSummary.fileCount})`}
-                </button>
+                  <button
+                    type="button"
+                    disabled={checkedSummary.fileCount === 0 || isCommitting}
+                    className={`theme-segment-btn ${commitMode === 'checked' ? 'active' : ''}`}
+                    onClick={() => setCommitMode('checked')}
+                    title="Stage & commit all checked files"
+                  >
+                    Checked Files ({checkedSummary.fileCount}
+                    {checkedSummary.repoCount > 1
+                      ? ` / ${checkedSummary.repoCount} repos`
+                      : ''}
+                    )
+                  </button>
+                  <button
+                    type="button"
+                    disabled={stagedSummary.items.length === 0 || isCommitting}
+                    className={`theme-segment-btn ${commitMode === 'staged' ? 'active' : ''}`}
+                    onClick={() => setCommitMode('staged')}
+                    title="Commit ONLY currently staged files without adding unstaged changes"
+                  >
+                    Staged Only ({stagedSummary.items.length}
+                    {stagedSummary.repoCount > 1
+                      ? ` / ${stagedSummary.repoCount} repos`
+                      : ''}
+                    )
+                  </button>
+                </div>
+
+                <div
+                  className="modal-path"
+                  style={{
+                    maxHeight: 150,
+                    overflowY: 'auto',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 3
+                  }}
+                >
+                  {activeItems.map((item) => (
+                    <div key={`${item.repoName}::${item.path}`}>
+                      <strong>{item.repoName}</strong>{' '}
+                      <span
+                        style={{
+                          color:
+                            branchTargetMode === 'new' && cleanNewBranch
+                              ? 'var(--accent)'
+                              : item.branch === 'HEAD'
+                                ? 'var(--status-m)'
+                                : 'var(--text-secondary)',
+                          fontSize: '0.846rem'
+                        }}
+                      >
+                        [
+                        {branchTargetMode === 'new' && cleanNewBranch
+                          ? `${item.branch} → ${cleanNewBranch}`
+                          : item.branch}
+                        ]
+                      </span>{' '}
+                      / {item.path}
+                    </div>
+                  ))}
+                </div>
+
+                <label className="settings-field">
+                  <span>Commit Message</span>
+                  <textarea
+                    autoFocus
+                    className="commit-modal-textarea"
+                    value={commitMessage}
+                    disabled={isCommitting}
+                    onChange={(e) => setCommitMessage(e.target.value)}
+                    placeholder="Describe what you are committing..."
+                    onKeyDown={(e) => {
+                      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                        e.preventDefault();
+                        void handleSubmitCommitModal();
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div className="settings-footer">
+                <span
+                  style={{
+                    fontSize: '0.885rem',
+                    color: 'var(--text-secondary)'
+                  }}
+                >
+                  Press Ctrl+Enter to commit
+                </span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    className="btn"
+                    disabled={isCommitting}
+                    onClick={() => setCommitModalOpen(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="btn btn-primary"
+                    disabled={
+                      isCommitting ||
+                      !commitMessage.trim() ||
+                      activeItems.length === 0 ||
+                      newBranchInvalid
+                    }
+                    onClick={() => void handleSubmitCommitModal()}
+                  >
+                    {commitButtonLabel}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

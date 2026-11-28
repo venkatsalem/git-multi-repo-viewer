@@ -11,6 +11,7 @@ import {
   FolderOpen,
   FolderTree,
   GitBranch,
+  GitCompare,
   List,
   RefreshCw,
   Search,
@@ -58,6 +59,8 @@ interface FileExplorerSidebarProps {
   ) => Promise<void>;
   onRestoreSkipWorktreeRepo: (repo: RepoSummary) => Promise<void>;
   onOpenBranchModal: (repo: RepoSummary) => void;
+  onOpenBranchCompare: (repo: RepoSummary) => void;
+  onCompareWithBranch: (repo: RepoSummary, filePath: string) => void;
 }
 
 function joinRepoFilePath(repoPath: string, filePath: string): string {
@@ -80,7 +83,9 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
   onSkipWorktree,
   onRemoteAction,
   onRestoreSkipWorktreeRepo,
-  onOpenBranchModal
+  onOpenBranchModal,
+  onOpenBranchCompare,
+  onCompareWithBranch
 }) => {
   const [selectedRepoId, setSelectedRepoId] = useState<string>('ALL');
   const [filterText, setFilterText] = useState('');
@@ -413,6 +418,13 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
                     <>
                       <button
                         className="mini-btn"
+                        title="Compare this file with another branch..."
+                        onClick={() => onCompareWithBranch(repo, f.path)}
+                      >
+                        <GitCompare size={11} />
+                      </button>
+                      <button
+                        className="mini-btn"
                         title="Diff against HEAD"
                         onClick={() => onCompareVsHead(repo, f.path)}
                       >
@@ -465,6 +477,16 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
             }}
           >
             Diff against HEAD
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              onCompareWithBranch(fileContextMenu.repo, fileContextMenu.filePath);
+              setFileContextMenu(null);
+            }}
+          >
+            <GitCompare size={14} /> Compare with Branch...
           </button>
 
           <button
@@ -578,7 +600,18 @@ export const FileExplorerSidebar: React.FC<FileExplorerSidebarProps> = ({
               onOpenBranchModal(repo);
             }}
           >
-            <GitBranch size={14} /> Switch / Create Branch...
+            <GitBranch size={14} /> Switch / Manage Branches...
+          </button>
+
+          <button
+            className="context-menu-item"
+            onClick={() => {
+              const repo = repoContextMenu.repo;
+              setRepoContextMenu(null);
+              onOpenBranchCompare(repo);
+            }}
+          >
+            <GitCompare size={14} /> Compare with Another Branch...
           </button>
 
           <div className="context-menu-divider" />
